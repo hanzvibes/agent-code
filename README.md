@@ -30,12 +30,13 @@ Code Harness is an Android-first coding workspace with an AI assistant. It is a 
   - Markdown message rendering supporting headings, bullet/numbered lists, inline code, and styled fenced code blocks.
   - Explicit one-tap copy actions for both individual code blocks and entire assistant responses.
   - Prompt retry (resending last failed user prompt without duplicates) and response regeneration (reusing paired user prompt).
-- **Safe Agent Workspace Tools (Opt-in)**:
-  - Explicit opt-in toggle (default OFF) for read-only project inspection tools: `list_project_files`, `read_project_file` (bounded to 512 KB, 16 KB output preview), and `search_project`.
-  - Strictly limited to 3 tool rounds and 6 tool calls per user turn.
-  - Disallowed tools (shell, command execution, network, writes, deletes) are rejected with bounded error outputs.
-  - Live app-generated progress summaries derived from app actions (never exposing private model thoughts).
-  - Tool calls and results remain transient to the generation request and are never stored in saved chat sessions.
+- **Grouped Agent Tools (Opt-in)**:
+  - Three small groups are exposed only when selected for the current session: read-only project inspection, one Termux runtime command tool, and one Android-native actions router.
+  - Project inspection includes `list_project_files`, `read_project_file` (bounded to 512 KB, 16 KB output preview), and `search_project`.
+  - Termux runs a bounded command in the open shared-storage project and streams stdout/stderr to the live activity panel; final output and exit status are returned to the model. Runs are limited to 1–120 seconds, 32 KB command text, 16 KB of output per stream, and 6 tool calls per turn.
+  - Termux is not a sandbox: commands have Termux permissions and network access and can change or delete files directly, outside diff review. It is separately disabled by default and requires Termux setup plus the Android Run commands permission.
+  - The Android actions group can copy/share text or open an HTTP(S) link. Each action shows an in-app approval with the exact payload first; no broad device permissions are requested.
+  - Tool groups remain transient to the generation request and are never stored in saved chat sessions. The agent receives only enabled tools and concise group-specific instructions.
 - **Safe Patch Review with Per-Hunk Selection and One-Step Rollback**:
   - Unified diff proposals extracted from responses, parsed into per-file and per-hunk structures.
   - Interactive hunk-level review with include checkboxes (defaulted to selected), hunk line range badges, and select-all / select-none controls.
@@ -66,11 +67,11 @@ Each assistant request sends the following to your selected provider — nothing
 - **Open file** — always included, up to 24,000 characters of content.
 - **Selected additional files** — up to 7 extra files you explicitly choose from the file picker, sharing a combined character budget of 48,000 characters across all files. Files are included in full up to the budget; any file that exceeds its share of the budget is marked `[truncated]` explicitly in both the system prompt and the UI.
 - **Your current-session conversation** (prompts and replies in the current session only).
-- **Transient tool calls & outputs** (if workspace tools are explicitly enabled).
+- **Transient tool calls & outputs** (only for tool groups explicitly enabled in this session; Termux commands execute on-device through the user's Termux installation).
 
 The full repository is never uploaded. Requests go directly from the app to your selected provider; Code Harness does not proxy them. The context-disclosure banner in the Assistant view shows exactly how many files are included before each request; after a request, truncated files are marked in the picker and banner. An `http://` gateway is unencrypted; avoid sending an API key over HTTP.
 
-The app does not execute shell commands, run builds or tests, or claim that code has been executed. AI edits are proposals; they are not written until you review and apply them.
+The app runs shell commands only when the Termux runtime is explicitly enabled for the session and the required Android/Termux setup is complete. Termux commands execute with Termux's own permissions and are not sandboxed; inspect the live command and output, and keep the runtime off unless you trust the configured provider. AI source edits remain proposals; the diff review flow is unchanged and must be approved before applying them.
 
 ## Custom gateway
 

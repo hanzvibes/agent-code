@@ -72,15 +72,13 @@ class SettingsView extends StatelessWidget {
                       style: t.caption,
                     ),
                     const SizedBox(height: 12),
-                    Text(
-                      'Safe Workspace Tools (Optional)',
-                      style: t.bodyStrong,
-                    ),
+                    Text('Agent Tool Groups (Optional)', style: t.bodyStrong),
                     const SizedBox(height: 6),
                     Text(
-                      '• When explicitly enabled, tools only perform strictly bounded, read-only file reads (512 KB cap, 16 KB preview) and project search.\n'
-                      '• Code Harness never executes terminal commands, test runners, or network calls from tools.\n'
-                      '• Tool calls and outputs remain transient to the request and are never stored in chat history.',
+                      '• Project inspection is read-only and bounded. Termux command execution is a separate opt-in and is off by default.\n'
+                      '• Enabled Termux commands run on-device with Termux permissions and network access; they are not sandboxed and can directly change or delete files.\n'
+                      '• Android copy/share/link actions are another optional group and require in-app approval of the exact payload each time.\n'
+                      '• Only enabled tool groups are sent to the provider. Tool calls/results are transient and are not stored in saved chat history.',
                       style: t.caption,
                     ),
                   ],

@@ -10,8 +10,10 @@ import '../../controllers/assistant_controller.dart';
 import '../../controllers/project_controller.dart';
 import '../../controllers/review_controller.dart';
 import '../../core/ui.dart';
+import '../../services/android_native_action_service.dart';
 import '../../models/chat_message.dart';
 import '../../models/file_node.dart';
+import '../../services/termux_runtime_service.dart';
 import '../../services/workspace_service.dart';
 import '../../utils/unified_patch.dart';
 import '../../widgets/markdown_message_view.dart';
@@ -33,6 +35,9 @@ class _AssistantViewState extends State<AssistantView> {
   void dispose() {
     _textController.dispose();
     _scrollController.dispose();
+    if (Get.isRegistered<AssistantController>()) {
+      Get.find<AssistantController>().onAndroidActionApproval = null;
+    }
     super.dispose();
   }
 
@@ -60,6 +65,8 @@ class _AssistantViewState extends State<AssistantView> {
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
     final ctrl = Get.find<AssistantController>();
+    ctrl.onAndroidActionApproval = (request) =>
+        _confirmAndroidAction(context, request);
     final projCtrl = Get.find<ProjectController>();
 
     return Scaffold(
@@ -157,6 +164,14 @@ class _AssistantViewState extends State<AssistantView> {
                       },
                     ),
             ),
+            if (ctrl.runtimeOutput.value.isNotEmpty)
+              _RuntimeOutputCard(
+                output: ctrl.runtimeOutput.value,
+                isRunning:
+                    ctrl.isLoading.value &&
+                    ctrl.statusMessage.value.startsWith('Termux'),
+                t: t,
+              ),
             if (ctrl.statusMessage.value.isNotEmpty)
               _StatusBanner(
                 status: ctrl.statusMessage.value,
@@ -186,6 +201,72 @@ class _AssistantViewState extends State<AssistantView> {
         );
       }),
     );
+  }
+
+  Future<bool> _confirmAndroidAction(
+    BuildContext context,
+    AndroidActionRequest request,
+  ) async {
+    if (!context.mounted) return false;
+    final actionLabel = switch (request.action) {
+      'open_link' => 'Open link',
+      'share_text' => 'Open share sheet',
+      _ => 'Copy text',
+    };
+    return await showModalBottomSheet<bool>(
+          context: context,
+          isScrollControlled: true,
+          useSafeArea: true,
+          builder: (sheetContext) {
+            final t = AppTokens.of(sheetContext);
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: t.sheetHandle,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(request.title, style: t.title),
+                  const SizedBox(height: 6),
+                  Text(request.description, style: t.caption),
+                  const SizedBox(height: 12),
+                  AppCard(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 180),
+                      child: SingleChildScrollView(
+                        child: SelectableText(
+                          request.preview,
+                          style: t.small.copyWith(fontFamily: 'monospace'),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  PrimaryButton(
+                    label: actionLabel,
+                    onPressed: () => Navigator.of(sheetContext).pop(true),
+                  ),
+                  const SizedBox(height: 4),
+                  TextButton(
+                    onPressed: () => Navigator.of(sheetContext).pop(false),
+                    child: const Text('Cancel'),
+                  ),
+                ],
+              ),
+            );
+          },
+        ) ==
+        true;
   }
 
   void _openSettingsSheet(BuildContext context, AssistantController ctrl) {
@@ -253,7 +334,10 @@ class _ContextBanner extends StatelessWidget {
       final total = ctrl.contextFileCount;
       final extra = ctrl.selectedExtraContextCount;
       final snapshot = ctrl.lastSnapshot.value;
-      final toolsOn = ctrl.enableTools.value;
+      final toolsOn =
+          ctrl.enableTools.value ||
+          ctrl.enableTermuxRuntime.value ||
+          ctrl.enableAndroidActions.value;
       final lastRequestWasTruncated =
           snapshot != null &&
           p.equals(snapshot.workspaceRoot, projCtrl.workspacePath.value) &&
@@ -268,10 +352,10 @@ class _ContextBanner extends StatelessWidget {
             ? '$extra selected'
             : 'open + $extra selected';
         bannerText =
-            'Project tree + $total context file${total == 1 ? '' : 's'} ($included) sent directly to provider.${toolsOn ? ' Tools ON.' : ''} Context leaves device.';
+            'Project tree + $total context file${total == 1 ? '' : 's'} ($included) sent directly to provider.${toolsOn ? ' Agent tools ON.' : ''} Context leaves device.';
       } else {
         bannerText =
-            'Project tree and chat go to provider.${toolsOn ? ' Tools ON.' : ''} Choose files to include source code. Context leaves device.';
+            'Project tree and chat go to provider.${toolsOn ? ' Agent tools ON.' : ''} Choose files to include source code. Context leaves device.';
       }
       if (lastRequestWasTruncated) {
         bannerText +=
@@ -825,6 +909,94 @@ class _StreamingBubble extends StatelessWidget {
   }
 }
 
+class _RuntimeOutputCard extends StatelessWidget {
+  final String output;
+  final bool isRunning;
+  final AppTokens t;
+
+  const _RuntimeOutputCard({
+    required this.output,
+    required this.isRunning,
+    required this.t,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final preview = output.length > 1800
+        ? output.substring(output.length - 1800)
+        : output;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: t.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: t.hairline),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.terminal_rounded, size: 16, color: t.accent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Termux command output',
+                  style: t.small.copyWith(fontWeight: FontWeight.w600),
+                ),
+              ),
+              if (isRunning) ...[
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 1.7),
+                ),
+                const SizedBox(width: 6),
+                Text('Live', style: t.small.copyWith(color: t.accent)),
+              ] else
+                Text('Latest run', style: t.small.copyWith(color: t.muted)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 76),
+            child: SingleChildScrollView(
+              reverse: true,
+              child: SelectableText(
+                preview,
+                style: t.small.copyWith(fontFamily: 'monospace', color: t.text),
+              ),
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: () => showModalBottomSheet<void>(
+                context: context,
+                isScrollControlled: true,
+                useSafeArea: true,
+                builder: (_) => SafeArea(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: SingleChildScrollView(
+                      child: SelectableText(
+                        output,
+                        style: t.small.copyWith(fontFamily: 'monospace'),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              child: const Text('View output'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ── Live Status Banner ───────────────────────────────────────────────────
 
 class _StatusBanner extends StatelessWidget {
@@ -1176,6 +1348,11 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
   late double? _temp;
   late int? _maxTokens;
   late bool _tools;
+  late bool _termux;
+  late bool _androidActions;
+  final TermuxRuntimeService _termuxRuntime = TermuxRuntimeService();
+  TermuxRuntimeStatus? _termuxStatus;
+  bool _loadingTermuxStatus = true;
 
   @override
   void initState() {
@@ -1183,6 +1360,112 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
     _temp = widget.ctrl.sessionTemperature.value;
     _maxTokens = widget.ctrl.sessionMaxTokens.value;
     _tools = widget.ctrl.enableTools.value;
+    _termux = widget.ctrl.enableTermuxRuntime.value;
+    _androidActions = widget.ctrl.enableAndroidActions.value;
+    _refreshTermuxStatus();
+  }
+
+  Future<void> _refreshTermuxStatus() async {
+    try {
+      final status = await _termuxRuntime.getStatus();
+      if (mounted) setState(() => _termuxStatus = status);
+    } catch (_) {
+      if (mounted) setState(() => _termuxStatus = null);
+    } finally {
+      if (mounted) setState(() => _loadingTermuxStatus = false);
+    }
+  }
+
+  void _showTermuxSetup(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) {
+        final t = AppTokens.of(sheetContext);
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.78,
+          maxChildSize: 0.95,
+          builder: (_, scrollCtrl) => ListView(
+            controller: scrollCtrl,
+            padding: const EdgeInsets.all(20),
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: t.sheetHandle,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text('Set up Termux runtime', style: t.title),
+              const SizedBox(height: 8),
+              Text(
+                _loadingTermuxStatus
+                    ? 'Checking Termux…'
+                    : _termuxStatus == null
+                    ? 'Could not read Termux status on this device.'
+                    : !_termuxStatus!.installed
+                    ? 'Termux is not installed.'
+                    : _termuxStatus!.permissionGranted
+                    ? 'Termux is installed and the Android command permission is granted. Finish the Termux settings below if needed.'
+                    : 'Termux is installed, but Code Harness still needs the Android command permission.',
+                style: t.caption,
+              ),
+              const SizedBox(height: 16),
+              AppNotice(
+                'Commands run as Termux, not inside an OS sandbox. They can modify project files and use Termux-visible storage and networking. Keep this switch off unless you trust the configured AI provider.',
+                icon: Icons.shield_outlined,
+              ),
+              const SizedBox(height: 16),
+              SectionHeader('One-time setup'),
+              AppCard(
+                child: Text(
+                  '1. Install and open Termux once (version 0.109 or newer).\n'
+                  '2. In Termux, install the bounded-timeout utility and any runtimes you need, for example: pkg install coreutils nodejs python git\n'
+                  '3. Run termux-setup-storage, and keep the project under shared storage such as /storage/emulated/0.\n'
+                  '4. In ~/.termux/termux.properties, set allow-external-apps = true, then restart Termux.\n'
+                  '5. Grant Code Harness the Android permission “Run commands in Termux environment” in its app permissions.',
+                  style: t.small,
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _termuxStatus?.installed == true
+                    ? () async {
+                        Navigator.of(sheetContext).pop();
+                        try {
+                          await _termuxRuntime.openTermux();
+                        } catch (_) {}
+                      }
+                    : null,
+                icon: const Icon(Icons.terminal_rounded),
+                label: const Text('Open Termux'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  Navigator.of(sheetContext).pop();
+                  try {
+                    await _termuxRuntime.openAppPermissionSettings();
+                  } catch (_) {}
+                },
+                icon: const Icon(Icons.settings_outlined),
+                label: const Text('Open Code Harness app settings'),
+              ),
+              TextButton.icon(
+                onPressed: _refreshTermuxStatus,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Refresh status'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -1305,15 +1588,18 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
             icon: Icons.lightbulb_outline_rounded,
           ),
           const SizedBox(height: 20),
-          SectionHeader('Workspace Tools (Agent)'),
+          SectionHeader('Agent Tool Groups'),
           AppCard(
             child: Column(
               children: [
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: Text('Enable workspace tools', style: t.bodyStrong),
+                  title: Text(
+                    'Inspect project (read-only)',
+                    style: t.bodyStrong,
+                  ),
                   subtitle: Text(
-                    'Allows the model to call read-only tools to inspect files and search code.',
+                    'A small project group: list files, read files, and search code.',
                     style: t.caption,
                   ),
                   value: _tools,
@@ -1322,14 +1608,94 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
                     widget.ctrl.enableTools.value = on;
                   },
                 ),
-                if (_tools) ...[
-                  Divider(height: 1, color: t.hairline),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Privacy & safety disclosure: Enabling workspace tools allows your configured provider to request read-only directory listings, file contents (up to 512 KB, 16 KB preview), and project search results during conversations. Tools never modify files, run tests, or execute commands. Max 3 tool rounds and 6 calls per user turn.',
-                    style: t.small,
+                if (_tools)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Text(
+                      'Only these enabled inspection tools are exposed to your provider. They read workspace files; they cannot write files or run commands.',
+                      style: t.small,
+                    ),
+                  ),
+                Divider(height: 1, color: t.hairline),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('Run commands with Termux', style: t.bodyStrong),
+                  subtitle: Text(
+                    Get.find<ProjectController>().hasWorkspace
+                        ? 'One runtime tool for builds/tests, Git, Node/npm, and Python.'
+                        : 'Open a project first to enable project commands.',
+                    style: t.caption,
+                  ),
+                  value: _termux,
+                  onChanged: Get.find<ProjectController>().hasWorkspace
+                      ? (on) {
+                          setState(() => _termux = on);
+                          widget.ctrl.enableTermuxRuntime.value = on;
+                        }
+                      : null,
+                ),
+                if (_termux) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AppNotice(
+                          'Commands run with Termux permissions and network access; they can modify or delete files directly, outside diff review. Each run is limited to 1–120 seconds, 32 KB of command text, and 16 KB of returned output per stream.',
+                          icon: Icons.warning_amber_rounded,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _loadingTermuxStatus
+                              ? 'Checking Termux status…'
+                              : _termuxStatus == null
+                              ? 'Termux status is unavailable.'
+                              : !_termuxStatus!.installed
+                              ? 'Termux is not installed.'
+                              : _termuxStatus!.permissionGranted
+                              ? 'Termux found • Android command permission granted'
+                              : 'Termux found • Android command permission still needed',
+                          style: t.small,
+                        ),
+                        TextButton.icon(
+                          onPressed: () => _showTermuxSetup(context),
+                          icon: const Icon(Icons.settings_outlined),
+                          label: const Text('Termux setup & permissions'),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
+                Divider(height: 1, color: t.hairline),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text('Android actions', style: t.bodyStrong),
+                  subtitle: Text(
+                    'Copy/share text or open a web link through phone-native UI.',
+                    style: t.caption,
+                  ),
+                  value: _androidActions,
+                  onChanged: (on) {
+                    setState(() => _androidActions = on);
+                    widget.ctrl.enableAndroidActions.value = on;
+                  },
+                ),
+                if (_androidActions)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Text(
+                      'Only one Android actions tool is exposed. Every copy, share, or external link first shows an in-app approval with the exact payload. No broad phone permissions are requested.',
+                      style: t.small,
+                    ),
+                  ),
+                Divider(height: 1, color: t.hairline),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  child: Text(
+                    'Only enabled groups are sent to the model: up to 3 tool rounds and 6 tool calls per turn.',
+                    style: t.small,
+                  ),
+                ),
               ],
             ),
           ),
