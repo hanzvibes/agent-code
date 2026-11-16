@@ -93,6 +93,7 @@ if [ "$WITH_ASSETS" = "1" ] && [ -z "$ASSETS_OUT" ]; then echo "--assets-out is 
 BASE_URL="https://packages.termux.dev/apt/termux-main"
 # Format per package: "<pool-aarch64>|<sha256-aarch64>|<pool-x86_64>|<sha256-x86_64>".
 declare -A DEBS=(
+  [bash]="pool/main/b/bash/bash_5.3.20_aarch64.deb|26b5b3ab5b0ac0e3b372ac1e7ddd89270519c1eb25b88fe4175485c2de8086b2|pool/main/b/bash/bash_5.3.20_x86_64.deb|f8c984e68269df3df2efae9f2835a9d9af381a8f80d08b34160772bc16cd0910"
   [brotli]="pool/main/b/brotli/brotli_1.2.1_aarch64.deb|4fba29438b2b44f8470d52173b4548e938542dc2fc632f8699be5a284cbb9485|pool/main/b/brotli/brotli_1.2.1_x86_64.deb|de652571f92e74c7f0cfe71e16cfc6ead340b184dda024614e6cab3048234142"
   [c-ares]="pool/main/c/c-ares/c-ares_1.34.9_aarch64.deb|623d84855e176f3f2a415d24c0e1d2f529356f4b5439bb3313e6d7ff0da4585c|pool/main/c/c-ares/c-ares_1.34.9_x86_64.deb|ac96c37fcc9181d1a7095f60485457fe6c3d784a83b0e8e6e7af9b3bfceda237"
   [ca-certificates]="pool/main/c/ca-certificates/ca-certificates_1:2026.11.05-1_all.deb|12fc350fc5ad638338b06b04835bce897615f8c93f96d30ac396cdb39b850c6b|pool/main/c/ca-certificates/ca-certificates_1:2026.11.05-1_all.deb|12fc350fc5ad638338b06b04835bce897615f8c93f96d30ac396cdb39b850c6b"
@@ -323,6 +324,12 @@ stage_lib "lib/libandroid-selinux.so" "libandroid-selinux.so"
 stage_lib "lib/libiconv.so" "libiconv.so"
 stage_lib "lib/libpcre2-8.so" "libpcre2-8.so"
 
+# --- bash (1 file, ~0.95 MB, measured) ---
+# Option B (remove-Termux): bash is the bundled runtime's default
+# shell (tools/bin/bash symlink); DT_NEEDED libreadline.so.8 is
+# already in the RENAME map, libandroid-support/libiconv already staged.
+stage_lib "bin/bash" "libbash.so"
+
 # --- ffmpeg (93 files, 96020072 B, measured) ---
 stage_lib "bin/ffmpeg" "libffmpeg.so"
 stage_lib "bin/ffprobe" "libffprobe.so"
@@ -460,7 +467,7 @@ declare -A RENAME=(
 )
 for lib in "$JNI_OUT"/lib*.so; do
   name="$(basename "$lib")"; args=()
-  case "$name" in libgit.so|librg.so|libnode.so|libpython3.so|libjq-cli.so|libcurl-cli.so|libxz.so|libtar.so|libffmpeg.so|libffprobe.so|libgit-remote-http.so|libgit-http-fetch.so|libgit-http-push.so|libgit-daemon.so|libgit-http-backend.so|libgit-imap-send.so|libgit-sh-i18n--envsubst.so) ;;
+  case "$name" in libbash.so|libgit.so|librg.so|libnode.so|libpython3.so|libjq-cli.so|libcurl-cli.so|libxz.so|libtar.so|libffmpeg.so|libffprobe.so|libgit-remote-http.so|libgit-http-fetch.so|libgit-http-push.so|libgit-daemon.so|libgit-http-backend.so|libgit-imap-send.so|libgit-sh-i18n--envsubst.so) ;;
     *) current_soname="$("$PATCHELF" --print-soname "$lib" 2>/dev/null || true)"
        if [ "$current_soname" != "$name" ]; then args+=(--set-soname "$name"); fi ;;
   esac

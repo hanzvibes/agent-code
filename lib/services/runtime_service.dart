@@ -4,19 +4,17 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
-import 'termux_runtime_service.dart';
-
 /// Result of one command run through [RuntimeService].
 ///
 /// Carries the backend that actually ran the command (`bundled`,
-/// `termux`, or `none` when no backend could run it), so the timeline
+/// or `none` when no backend could run it), so the timeline
 /// and the model can tell where a command executed.
 class CommandResult {
   final String stdout;
   final String stderr;
   final int exitCode;
 
-  /// Human-readable failure reason (Termux error, timeout, backend
+  /// Human-readable failure reason (timeout, backend
   /// unavailable). Null on success.
   final String? error;
   final String backend;
@@ -56,7 +54,7 @@ class ToolProbe {
   /// First line of `<tool> --version`, or null when unavailable.
   final String? version;
 
-  /// Backend that has the tool (`bundled` / `termux`), or `none`.
+  /// Backend that has the tool (`bundled`), or `none`.
   final String backend;
 
   const ToolProbe({
@@ -77,20 +75,17 @@ class ToolProbe {
 /// One command-execution backend (Batch 3 — desain D5).
 ///
 /// The interface Tier 2 implements against: the bundled backend runs
-/// tools shipped inside the APK (see `BundledRuntimeBackend`, still a
-/// stub in this batch), the Termux backend shells out to the Termux
-/// app. Backends must enforce the shared limits — command 1–120 s,
-/// 32 KB, output 16 KB per stream — so callers can rely on them no
-/// matter which backend runs.
+/// tools shipped inside the APK (see `BundledRuntimeBackend`). It is
+/// the only backend — there is no fallback. Backends must enforce the
+/// shared limits — command 1–120 s, 32 KB, output 16 KB per stream —
+/// so callers can rely on them.
 ///
 /// NOTE (interface decision, see PR body): `run` takes both
-/// [workspaceRoot] and [cwd]. The Termux backend needs the project
-/// root for its shared-storage rule; the bundled backend ignores it
+/// [workspaceRoot] and [cwd]. The bundled backend ignores the root
 /// and only uses [cwd]. Callers always pass the workspace root and
 /// the absolute working directory inside it.
 abstract interface class RuntimeBackend {
-  /// Stable id recorded in [CommandResult.backend]: `bundled`,
-  /// `termux`, …
+  /// Stable id recorded in [CommandResult.backend]: `bundled`, …
   String get name;
 
   /// Runs [command] with [cwd] as the working directory.
@@ -107,10 +102,7 @@ abstract interface class RuntimeBackend {
   });
 
   /// True when the backend can run [name] (a tool binary, not a shell
-  /// builtin). Used for backend selection and probing. The Termux
-  /// backend runs `command -v` in [workspaceRoot]/[cwd], so callers
-  /// probing a real workspace must pass them; the bundled backend
-  /// ignores them.
+  /// builtin). Used for backend selection and probing.
   Future<bool> hasTool(
     String name, {
     String workspaceRoot = '',
@@ -120,88 +112,6 @@ abstract interface class RuntimeBackend {
   /// Cancels the backend's active command, if any. Backends without
   /// a cancellable command do nothing.
   Future<void> cancelActiveCommand();
-}
-
-/// Termux backend: wraps the existing [TermuxRuntimeAdapter]
-/// (MethodChannel to the Termux app). The first backend; it stays the
-/// fallback for every tool the bundle does not have.
-class TermuxRuntimeBackend implements RuntimeBackend {
-  final TermuxRuntimeAdapter _adapter;
-
-  TermuxRuntimeBackend([TermuxRuntimeAdapter? adapter])
-    : _adapter = adapter ?? TermuxRuntimeService();
-
-  @override
-  String get name => 'termux';
-
-  @override
-  Future<CommandResult> run({
-    required String command,
-    required String workspaceRoot,
-    required String cwd,
-    int timeoutSeconds = 30,
-    Map<String, String>? env,
-    void Function(String channel, String chunk)? onOutput,
-  }) async {
-    // env is accepted for interface compatibility; Termux runs the
-    // command through `bash -lc` with the device environment, so
-    // per-command variables are folded into the command itself by
-    // the caller when needed.
-    try {
-      final result = await _adapter.execute(
-        command: command,
-        workspaceRoot: workspaceRoot,
-        workingDirectory: cwd,
-        timeoutSeconds: timeoutSeconds,
-        onOutput: onOutput,
-      );
-      return CommandResult(
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode,
-        error: result.error,
-        backend: name,
-        stdoutTruncated: result.stdoutTruncated,
-        stderrTruncated: result.stderrTruncated,
-      );
-    } catch (error) {
-      return CommandResult(
-        exitCode: 125,
-        error: 'Termux command failed: $error',
-        backend: name,
-      );
-    }
-  }
-
-  @override
-  Future<bool> hasTool(
-    String name, {
-    String workspaceRoot = '',
-    String cwd = '',
-  }) async {
-    if (!_isSafeToolName(name)) return false;
-    try {
-      // `command -v` is a bash builtin: exit 0 when the tool is on
-      // PATH, 1 when it is not. A short timeout keeps probing cheap.
-      // The native side requires a real workspace context, so
-      // callers probing a workspace pass it through.
-      final result = await _adapter.execute(
-        command: 'command -v $name',
-        workspaceRoot: workspaceRoot,
-        workingDirectory: cwd.isEmpty ? workspaceRoot : cwd,
-        timeoutSeconds: 10,
-      );
-      return result.exitCode == 0;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  @override
-  Future<void> cancelActiveCommand() => _adapter.cancelActiveCommand();
-
-  static bool _isSafeToolName(String name) =>
-      RegExp(r'^[A-Za-z0-9][A-Za-z0-9._+-]*$').hasMatch(name);
 }
 
 /// Paths the Android side reports for the bundled runtime.
@@ -490,8 +400,7 @@ class BundledRuntimeBackend implements RuntimeBackend {
   static const String notAvailableMessage =
       'Bundled runtime is not available yet: the Tier 2 bundled '
       'toolchain has not been installed in this build, so the command '
-      'was not run. Use the Termux backend instead (it needs the '
-      'Termux app and a project under shared storage).';
+      'was not run.';
 
   /// Bumped when the staged assets change; a mismatch re-extracts them.
   static const String assetsVersion = 'tier2-v1';
@@ -516,6 +425,9 @@ class BundledRuntimeBackend implements RuntimeBackend {
     'tar': 'libtar.so',
     'ffmpeg': 'libffmpeg.so',
     'ffprobe': 'libffprobe.so',
+    // Option B: the staged bash is the bundled runtime's default
+    // shell (see [run]); it also makes `bash <script>` runnable.
+    'bash': 'libbash.so',
   };
 
   /// Tools that are only a shell function, not a symlink in `tools/bin`.
@@ -536,7 +448,7 @@ class BundledRuntimeBackend implements RuntimeBackend {
   };
 
   /// git-remote helpers are symlinks to `git-remote-http` in the
-  /// Termux package; the runtime recreates them that way.
+  /// upstream package; the runtime recreates them that way.
   static const Set<String> _gitRemoteHelpers = {
     'git-remote-https',
     'git-remote-ftp',
@@ -557,6 +469,11 @@ class BundledRuntimeBackend implements RuntimeBackend {
   final BundledRuntimePathsProvider _pathsProvider;
   final BundledProcessRunner _runner;
   final BundledAssetExtractor _assetExtractor;
+
+  /// Shell the backend was built with. The default is the device
+  /// shell; [run] replaces it with the staged bash symlink whenever
+  /// the default is in use. Tests inject their own shell here.
+  static const String _defaultShellExecutable = '/system/bin/sh';
   final String _shellExecutable;
 
   Future<_BundledSetup?>? _setupFuture;
@@ -565,7 +482,7 @@ class BundledRuntimeBackend implements RuntimeBackend {
     BundledRuntimePathsProvider? pathsProvider,
     BundledProcessRunner? processRunner,
     BundledAssetExtractor? assetExtractor,
-    String shellExecutable = '/system/bin/sh',
+    String shellExecutable = _defaultShellExecutable,
   }) : _pathsProvider =
            pathsProvider ?? const _MethodChannelBundledRuntimePathsProvider(),
        _runner = processRunner ?? ProcessBundledProcessRunner(),
@@ -597,7 +514,7 @@ class BundledRuntimeBackend implements RuntimeBackend {
       'XDG_CONFIG_HOME': '$home/.config',
       'PATH': '$engineDir/tools/bin:/system/bin:/system/xbin:/vendor/bin',
       'LANG': 'C.UTF-8',
-      'SHELL': '/system/bin/sh',
+      'SHELL': '$engineDir/tools/bin/bash',
       'SSL_CERT_FILE': '$engineDir/node/etc/tls/cert.pem',
       'PYTHONHOME': '$engineDir/python',
       'LD_LIBRARY_PATH': nativeLibraryDir,
@@ -608,9 +525,12 @@ class BundledRuntimeBackend implements RuntimeBackend {
   }
 
   /// Shell-function preamble prepended to every command run through
-  /// `/system/bin/sh -c` (not shown to the user: the recorded command
-  /// stays as typed). Provides `npm`/`npx`/`pip`, which have no binary
-  /// of their own — the `bin/npm` wrapper ships a dead Termux shebang.
+  /// the bundled bash (`tools/bin/bash -c`; `/system/bin/sh` only as
+  /// a fallback when the bash link is missing — see [run]). It is not
+  /// shown to the user: the recorded command stays as typed.
+  /// Provides `npm`/`npx`/`pip`, which have no binary of their own —
+  /// the `bin/npm` wrapper ships a shebang pointing outside the
+  /// bundle, so it cannot run directly.
   static String shellPreamble(String engineDir) {
     final npmCli =
         '$engineDir/node/lib/node_modules/npm/bin/npm-cli.js';
@@ -660,8 +580,16 @@ class BundledRuntimeBackend implements RuntimeBackend {
       tmpDir: setup.tmpDir,
     );
     if (env != null) environment.addAll(env);
+    // Bash is the bundled shell (Option B): run through the staged
+    // `tools/bin/bash` symlink. A test-injected shell still wins, and
+    // a missing symlink falls back to the device shell.
+    final shell = _shellExecutable == _defaultShellExecutable
+        ? (File('${setup.engineDir}/tools/bin/bash').existsSync()
+              ? '${setup.engineDir}/tools/bin/bash'
+              : _defaultShellExecutable)
+        : _shellExecutable;
     final result = await _runner.run(
-      executable: _shellExecutable,
+      executable: shell,
       arguments: ['-c', '${shellPreamble(setup.engineDir)}$trimmed'],
       workingDirectory: cwd,
       environment: environment,
@@ -690,7 +618,7 @@ class BundledRuntimeBackend implements RuntimeBackend {
     String workspaceRoot = '',
     String cwd = '',
   }) async {
-    if (!TermuxRuntimeBackend._isSafeToolName(name)) return false;
+    if (!RuntimeService.isSafeToolName(name)) return false;
     final lib = bundledTools[name];
     if (lib == null) return false;
     final setup = await _ensureSetup();
@@ -844,97 +772,208 @@ class _BundledSetup {
 /// Single entry point for ALL command execution (Batch 3 — desain D5).
 ///
 /// `run_project_command` and the verifier go through here, never
-/// straight to [TermuxRuntimeService]. The service picks a backend per
-/// command from the tool the command needs, and records the choice in
-/// [CommandResult.backend].
+/// straight to a backend. The service picks the bundled backend when
+/// it can run the command's tool, and records the choice in
+/// [CommandResult.backend]. There is no fallback backend: a command
+/// whose tool is not bundled fails with exit 127 and a message
+/// naming the missing tool (see [missingToolMessage]) instead of
+/// running anywhere.
 ///
-/// Selection rule: the bundled backend first when it has the tool,
-/// otherwise Termux. Termux is always the fallback — it runs a real
-/// shell, so builtins, compound commands and tools installed
-/// mid-session still work there, and a missing tool fails with the
-/// shell's own "command not found" instead of a synthetic error.
+/// Selection rule: the first real command word of the command (see
+/// [_firstRealCommandWord] — shell builtins and `FOO=bar` prefixes
+/// are skipped, so `cd x && npm install` selects on `npm`). A
+/// bundled tool, or a common system applet that resolves via the
+/// bundled PATH, runs through the bundled shell; anything else is
+/// refused before it runs. Compound commands whose LATER tool is
+/// missing (for example `npm install && make build`) are NOT caught
+/// here — they fail inside bash with "command not found".
 /// The chosen backend per tool is cached for the service lifetime;
 /// call [invalidateToolCache] when a backend gains tools (Tier 2
 /// staging does this after linking a new tool).
 class RuntimeService {
   /// Shared limits (desain §2 / D5): commands 1–120 s, 32 KB,
-  /// output 16 KB per stream. The Termux backend enforces them today;
-  /// the bundled backend must enforce the same when it lands.
-  static const int maxCommandChars = TermuxRuntimeService.maxCommandChars;
-  static const int maxOutputCharsPerStream =
-      TermuxRuntimeService.maxOutputCharsPerStream;
-  static const int minTimeoutSeconds = TermuxRuntimeService.minTimeoutSeconds;
-  static const int maxTimeoutSeconds = TermuxRuntimeService.maxTimeoutSeconds;
+  /// output 16 KB per stream. The bundled backend enforces them.
+  static const int maxCommandChars = 32000;
+  static const int maxOutputCharsPerStream = 16000;
+  static const int minTimeoutSeconds = 1;
+  static const int maxTimeoutSeconds = 120;
 
   static const String noBackendName = 'none';
 
+  /// True when [name] is a safe bare tool name (no path, no shell
+  /// metacharacters). Guards [probeTool] and backend `hasTool`
+  /// against injection through the tool name.
+  static bool isSafeToolName(String name) =>
+      RegExp(r'^[A-Za-z0-9][A-Za-z0-9._+-]*$').hasMatch(name);
+
+  /// Message returned (exit 127, backend `none`) when a command
+  /// needs a tool the bundled runtime does not have. Nothing is run.
+  static String missingToolMessage(String tool) =>
+      'Tool "$tool" is not available in the bundled runtime: the '
+      'command was not run. Bundled tools: '
+      '${BundledRuntimeBackend.bundledTools.keys.join(', ')}. '
+      'Run probe_toolchain to see what is available.';
+
+  /// Shell keywords/builtins that name no external tool: the
+  /// selector skips them (and their arguments) and looks at the next
+  /// command segment instead. Bash itself runs these.
+  static const Set<String> _skippedBuiltins = {
+    // Required by the design: prefixes and builtins an agent
+    // command commonly starts with (`cd x && npm install`).
+    'cd',
+    'export',
+    'unset',
+    'source',
+    '.',
+    'test',
+    '[',
+    'true',
+    'false',
+    'set',
+    'eval',
+    'exec',
+    'echo',
+    // Other bash builtins/keywords: they name no external tool
+    // either, so a command made only of them still runs in bash
+    // (for example `echo oops >&2; exit 3`, `if …; then npm test`).
+    'exit',
+    'return',
+    'shift',
+    'break',
+    'continue',
+    'trap',
+    'alias',
+    'unalias',
+    'readonly',
+    'local',
+    'declare',
+    'typeset',
+    'pushd',
+    'popd',
+    'dirs',
+    'jobs',
+    'wait',
+    'kill',
+    'disown',
+    'umask',
+    'ulimit',
+    'history',
+    'command',
+    'builtin',
+    'type',
+    'hash',
+    'help',
+    'logout',
+    'suspend',
+    'bg',
+    'fg',
+    'getopts',
+    'let',
+    'read',
+    'printf',
+    'time',
+    'if',
+    'then',
+    'else',
+    'elif',
+    'fi',
+    'for',
+    'while',
+    'until',
+    'do',
+    'done',
+    'case',
+    'esac',
+    'function',
+    'select',
+    'in',
+    '{',
+    '}',
+    '!',
+    '[[',
+    ']]',
+  };
+
+  /// Common system applets that are not staged tools but resolve via
+  /// the bundled PATH (`/system/bin`, `/system/xbin`, `/vendor/bin`),
+  /// so they run through the bundled shell like bundled tools do.
+  static const Set<String> _systemApplets = {
+    'ls',
+    'cat',
+    'cp',
+    'mv',
+    'mkdir',
+    'rm',
+    'pwd',
+    'grep',
+    'sed',
+    'awk',
+    'head',
+    'tail',
+    'wc',
+    'sort',
+    'find',
+    'chmod',
+    'env',
+    'sleep',
+    'date',
+    'uname',
+    'ps',
+    'df',
+    'du',
+  };
+
   final RuntimeBackend _bundled;
-  final RuntimeBackend _termux;
 
   /// Backend chosen per tool name (see selection rule above).
   final Map<String, String> _toolBackendCache = {};
 
   RuntimeBackend? _activeBackend;
 
-  RuntimeService({RuntimeBackend? bundled, RuntimeBackend? termux})
-    : _bundled = bundled ?? BundledRuntimeBackend(),
-       _termux = termux ?? TermuxRuntimeBackend();
+  RuntimeService({RuntimeBackend? bundled})
+    : _bundled = bundled ?? BundledRuntimeBackend();
 
   String get bundledBackendName => _bundled.name;
-  String get termuxBackendName => _termux.name;
 
   /// Which backend would run a command needing [tool], honouring the
-  /// cache. Does not run anything.
+  /// cache. Does not run anything. Only `bundled` or `none`: a tool
+  /// the bundle does not have has no backend.
   Future<String> selectBackendForTool(String tool) async {
     final cached = _toolBackendCache[tool];
     if (cached != null) return cached;
     final name = await _bundled.hasTool(tool)
         ? _bundled.name
-        : _termux.name;
+        : noBackendName;
     _toolBackendCache[tool] = name;
     return name;
   }
 
-  /// True when any backend has [name]. The workspace context is
-  /// passed through to the Termux backend (see [RuntimeBackend]).
+  /// True when the bundled backend has [name]. The workspace context
+  /// is accepted for API stability and ignored.
   Future<bool> hasTool(
     String name, {
     String workspaceRoot = '',
     String cwd = '',
   }) async =>
-      await _bundled.hasTool(name) ||
-      await _termux.hasTool(
-        name,
-        workspaceRoot: workspaceRoot,
-        cwd: cwd,
-      );
+      _bundled.hasTool(name, workspaceRoot: workspaceRoot, cwd: cwd);
 
-  /// Probes one tool: which backend has it and what `<tool> --version`
-  /// reports. The version is the first non-empty output line.
-  /// [workspaceRoot]/[cwd] give the Termux backend its workspace
-  /// context (the native side rejects blank roots).
+  /// Probes one tool: whether the bundle has it and what
+  /// `<tool> --version` reports. The version is the first non-empty
+  /// output line. A tool the bundle does not have reports
+  /// `available: false, backend: 'none'`.
   Future<ToolProbe> probeTool(
     String tool, {
     String workspaceRoot = '',
     String cwd = '',
   }) async {
-    if (!TermuxRuntimeBackend._isSafeToolName(tool)) {
+    if (!isSafeToolName(tool)) {
       return ToolProbe(tool: tool, available: false, backend: noBackendName);
     }
     final backend = await selectBackendForTool(tool);
-    final runner = backend == _bundled.name ? _bundled : _termux;
-    // A tool the selected backend cannot actually run (Termux
-    // fallback for a missing tool) reports unavailable below.
-    if (backend == _termux.name &&
-        !await _termux.hasTool(
-          tool,
-          workspaceRoot: workspaceRoot,
-          cwd: cwd,
-        )) {
-      _toolBackendCache[tool] = noBackendName;
+    if (backend == noBackendName) {
       return ToolProbe(tool: tool, available: false, backend: noBackendName);
     }
-    final result = await runner.run(
+    final result = await _bundled.run(
       command: '$tool --version',
       workspaceRoot: workspaceRoot,
       cwd: cwd.isEmpty ? workspaceRoot : cwd,
@@ -971,8 +1010,10 @@ class RuntimeService {
   }
 
   /// Runs [command] in [workingDirectory] (absolute, inside
-  /// [workspaceRoot]) on the backend that has the tool the command
-  /// needs. The chosen backend is recorded in the result.
+  /// [workspaceRoot]) on the bundled backend. The chosen backend is
+  /// recorded in the result. A command whose tool is not bundled (and
+  /// not a system applet) is refused before it runs: exit 127,
+  /// backend `none`, error naming the missing tool.
   Future<CommandResult> run({
     required String command,
     required String workspaceRoot,
@@ -1000,11 +1041,20 @@ class RuntimeService {
         .clamp(minTimeoutSeconds, maxTimeoutSeconds)
         .toInt();
     final cwd = workingDirectory.isEmpty ? workspaceRoot : workingDirectory;
-    final backendName = await selectBackendForTool(_firstWord(trimmed));
-    final backend = backendName == _bundled.name ? _bundled : _termux;
-    _activeBackend = backend;
+    final tool = _firstRealCommandWord(trimmed);
+    if (tool.isNotEmpty && !_systemApplets.contains(tool)) {
+      final backendName = await selectBackendForTool(tool);
+      if (backendName == noBackendName) {
+        return CommandResult(
+          exitCode: 127,
+          error: missingToolMessage(tool),
+          backend: noBackendName,
+        );
+      }
+    }
+    _activeBackend = _bundled;
     try {
-      return await backend.run(
+      return await _bundled.run(
         command: trimmed,
         workspaceRoot: workspaceRoot,
         cwd: cwd,
@@ -1017,13 +1067,11 @@ class RuntimeService {
     }
   }
 
-  /// Cancels the active command on the backend that is running it.
+  /// Cancels the active command on the bundled backend, if any.
   Future<void> cancelActiveCommand() async {
     final backend = _activeBackend;
     if (backend != null) {
       await backend.cancelActiveCommand();
-    } else {
-      await _termux.cancelActiveCommand();
     }
   }
 
@@ -1038,13 +1086,99 @@ class RuntimeService {
     }
   }
 
-  /// First word of a shell command (the tool it needs), ignoring
-  /// leading whitespace and a single level of quoting.
-  static String _firstWord(String command) {
-    final trimmed = command.trimLeft();
-    final match = RegExp(r'''^["']?([^\s"'&|;]+)''').firstMatch(trimmed);
-    return match?.group(1) ?? '';
+  /// First word of [command] that names an external tool, skipping
+  /// shell operators, leading `FOO=bar` env assignments, and shell
+  /// builtins/keywords (with their arguments — a builtin segment
+  /// names no tool). Returns '' when the command is builtins and
+  /// assignments only (`echo hi`, `cd sub`), which bash runs itself.
+  ///
+  /// Examples: `cd x && npm install` → `npm`; `FOO=bar make build`
+  /// → `make`; `export FOO=bar; git status` → `git`.
+  static String _firstRealCommandWord(String command) {
+    final tokens = <String>[];
+    final buf = StringBuffer();
+    String? quote;
+    void flush() {
+      if (buf.isNotEmpty) {
+        tokens.add(buf.toString());
+        buf.clear();
+      }
+    }
+
+    for (var i = 0; i < command.length; i++) {
+      final ch = command[i];
+      if (quote != null) {
+        if (ch == quote) {
+          quote = null;
+        } else {
+          buf.write(ch);
+        }
+        continue;
+      }
+      if (ch == "'" || ch == '"') {
+        quote = ch;
+        continue;
+      }
+      if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+        flush();
+        continue;
+      }
+      if (ch == '&' ||
+          ch == '|' ||
+          ch == ';' ||
+          ch == '(' ||
+          ch == ')' ||
+          ch == '<' ||
+          ch == '>') {
+        flush();
+        if ((ch == '&' || ch == '|' || ch == '>') &&
+            i + 1 < command.length &&
+            command[i + 1] == ch) {
+          tokens.add('$ch$ch');
+          i++;
+        } else if ((ch == '>' || ch == '<') &&
+            i + 1 < command.length &&
+            command[i + 1] == '&') {
+          // `>&2` / `<&0`: one redirection token, so the `&` is not
+          // mistaken for the background operator.
+          tokens.add('$ch&');
+          i++;
+        } else {
+          tokens.add(ch);
+        }
+        continue;
+      }
+      buf.write(ch);
+    }
+    flush();
+
+    const operators = {'&&', '||', ';', '|', '&', '(', ')'};
+    const redirections = {'>', '>>', '<', '<<', '>&', '<&'};
+    var atCommandStart = true;
+    for (final token in tokens) {
+      if (operators.contains(token)) {
+        atCommandStart = true;
+        continue;
+      }
+      if (redirections.contains(token)) {
+        // A redirection target is an argument, not a command.
+        atCommandStart = false;
+        continue;
+      }
+      if (!atCommandStart) continue;
+      if (_isEnvAssignment(token)) continue;
+      if (_skippedBuiltins.contains(token)) {
+        // The rest of this segment is the builtin's arguments.
+        atCommandStart = false;
+        continue;
+      }
+      return token;
+    }
+    return '';
   }
+
+  static bool _isEnvAssignment(String token) =>
+      RegExp(r'^[A-Za-z_][A-Za-z0-9_]*=').hasMatch(token);
 
   /// First non-empty line of a `--version` run, capped so a chatty
   /// tool cannot flood the probe result.

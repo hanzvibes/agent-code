@@ -117,8 +117,8 @@ class SettingsView extends StatelessWidget {
                     Text('Agent Tool Groups (Optional)', style: t.bodyStrong),
                     const SizedBox(height: 6),
                     Text(
-                      '• Project inspection is read-only and bounded. Termux command execution is a separate opt-in and is off by default.\n'
-                      '• Enabled Termux commands run on-device with Termux permissions and network access; they are not sandboxed and can directly change or delete files.\n'
+                      '• Project inspection is read-only and bounded. Bundled runtime command execution is a separate opt-in and is off by default.\n'
+                      '• Enabled bundled-runtime commands run on-device with network access; they are not sandboxed and can directly change or delete files.\n'
                       '• Android copy/share/link actions are another optional group and require in-app approval of the exact payload each time.\n'
                       '• Only enabled tool groups are sent to the provider. Tool calls/results are transient and are not stored in saved chat history.',
                       style: t.caption,

@@ -80,43 +80,6 @@ class FakeAssetExtractor implements BundledAssetExtractor {
   }
 }
 
-/// Minimal second backend, for the RuntimeService selection tests.
-class FakeTermuxBackend implements RuntimeBackend {
-  @override
-  final String name = 'termux';
-  final Set<String> tools;
-  final List<String> ranCommands = [];
-
-  FakeTermuxBackend({this.tools = const {}});
-
-  @override
-  Future<CommandResult> run({
-    required String command,
-    required String workspaceRoot,
-    required String cwd,
-    int timeoutSeconds = 30,
-    Map<String, String>? env,
-    void Function(String channel, String chunk)? onOutput,
-  }) async {
-    ranCommands.add(command);
-    return CommandResult(
-      stdout: 'termux: $command\n',
-      exitCode: 0,
-      backend: name,
-    );
-  }
-
-  @override
-  Future<bool> hasTool(
-    String name, {
-    String workspaceRoot = '',
-    String cwd = '',
-  }) async => tools.contains(name);
-
-  @override
-  Future<void> cancelActiveCommand() async {}
-}
-
 class _Harness {
   final Directory root;
   final Directory nativeLib;
@@ -220,7 +183,7 @@ void main() {
         '/files/engine/tools/bin:/system/bin:/system/xbin:/vendor/bin',
       );
       expect(env['LANG'], 'C.UTF-8');
-      expect(env['SHELL'], '/system/bin/sh');
+      expect(env['SHELL'], '/files/engine/tools/bin/bash');
       expect(env['SSL_CERT_FILE'], '/files/engine/node/etc/tls/cert.pem');
       expect(env['PYTHONHOME'], '/files/engine/python');
       expect(env['LD_LIBRARY_PATH'], '/lib');
@@ -252,7 +215,7 @@ void main() {
   });
 
   group('BundledRuntimeBackend.bundledTools', () {
-    test('covers all eleven Tier 2 tools plus npm/npx/pip', () {
+    test('covers the Tier 2 tools plus npm/npx/pip and bash', () {
       final tools = BundledRuntimeBackend.bundledTools;
       expect(
         tools.keys,
@@ -270,6 +233,7 @@ void main() {
           'tar',
           'ffmpeg',
           'ffprobe',
+          'bash',
         ]),
       );
       expect(tools['git'], 'libgit.so');
@@ -277,6 +241,7 @@ void main() {
       expect(tools['curl'], 'libcurl-cli.so');
       expect(tools['npm'], 'libnode.so');
       expect(tools['pip'], 'libpython3.so');
+      expect(tools['bash'], 'libbash.so');
     });
   });
 
@@ -293,6 +258,10 @@ void main() {
         expect(
           await Link('${h.engineDir}/tools/bin/node').target(),
           '${h.nativeLib.path}/libnode.so',
+        );
+        expect(
+          await Link('${h.engineDir}/tools/bin/bash').target(),
+          '${h.nativeLib.path}/libbash.so',
         );
         expect(
           await Link('${h.engineDir}/tools/bin/git-remote-http').target(),
@@ -449,6 +418,61 @@ void main() {
       }
     });
 
+    test('runs through the staged bash symlink by default', () async {
+      final h = await _makeHarness();
+      try {
+        final backend = BundledRuntimeBackend(
+          pathsProvider: h.paths,
+          processRunner: h.runner,
+          assetExtractor: h.extractor,
+        );
+        final result = await backend.run(
+          command: 'git status',
+          workspaceRoot: '/tmp',
+          cwd: '/tmp',
+        );
+        expect(result.backend, 'bundled');
+        expect(result.ok, isTrue);
+        expect(h.runner.calls, hasLength(1));
+        expect(
+          h.runner.calls.single['executable'],
+          '${h.engineDir}/tools/bin/bash',
+        );
+        final env = h.runner.calls.single['environment'] as Map<String, String>;
+        expect(env['SHELL'], '${h.engineDir}/tools/bin/bash');
+      } finally {
+        await h.dispose();
+      }
+    });
+
+    test('falls back to the device shell when the bash link is missing',
+        () async {
+      final h = await _makeHarness(
+        libs: BundledRuntimeBackend.bundledTools.values.toSet().toList()
+          ..remove('libbash.so'),
+      );
+      try {
+        final backend = BundledRuntimeBackend(
+          pathsProvider: h.paths,
+          processRunner: h.runner,
+          assetExtractor: h.extractor,
+        );
+        final result = await backend.run(
+          command: 'git status',
+          workspaceRoot: '/tmp',
+          cwd: '/tmp',
+        );
+        expect(result.backend, 'bundled');
+        expect(h.runner.calls, hasLength(1));
+        expect(
+          h.runner.calls.single['executable'],
+          '/system/bin/sh',
+        );
+      } finally {
+        await h.dispose();
+      }
+    });
+
     test('clamps the timeout to 1-120 seconds', () async {
       final h = await _makeHarness();
       try {
@@ -548,14 +572,10 @@ void main() {
   });
 
   group('RuntimeService with the real bundled backend', () {
-    test('selects bundled for a bundled tool, termux otherwise',
-        () async {
+    test('selects bundled for a bundled tool, none otherwise', () async {
       final h = await _makeHarness();
       try {
-        final runtime = RuntimeService(
-          bundled: h.backend,
-          termux: FakeTermuxBackend(tools: {'flutter'}),
-        );
+        final runtime = RuntimeService(bundled: h.backend);
         final git = await runtime.run(
           command: 'git --version',
           workspaceRoot: '/tmp',
@@ -571,6 +591,27 @@ void main() {
         expect(probe.available, isTrue);
         expect(probe.backend, 'bundled');
         expect(probe.version, 'ok');
+        // A tool the bundle does not have has no backend: it is
+        // refused before it runs instead of falling back.
+        expect(
+          await runtime.selectBackendForTool('flutter'),
+          RuntimeService.noBackendName,
+        );
+        final flutterProbe = await runtime.probeTool(
+          'flutter',
+          workspaceRoot: '/tmp',
+          cwd: '/tmp',
+        );
+        expect(flutterProbe.available, isFalse);
+        expect(flutterProbe.backend, RuntimeService.noBackendName);
+        final flutterRun = await runtime.run(
+          command: 'flutter --version',
+          workspaceRoot: '/tmp',
+          workingDirectory: '/tmp',
+        );
+        expect(flutterRun.backend, RuntimeService.noBackendName);
+        expect(flutterRun.exitCode, 127);
+        expect(flutterRun.error, contains('Tool "flutter"'));
       } finally {
         await h.dispose();
       }
@@ -578,17 +619,16 @@ void main() {
 
     test('invalidateToolCache re-selects after a tool is staged',
         () async {
-      // ffmpeg is NOT staged yet: selection falls to termux.
+      // ffmpeg is NOT staged yet: selection reports no backend.
       final h = await _makeHarness(
         libs: BundledRuntimeBackend.bundledTools.values.toSet().toList()
           ..remove('libffmpeg.so'),
       );
       try {
-        final termux = FakeTermuxBackend(tools: {'ffmpeg'});
-        final runtime = RuntimeService(bundled: h.backend, termux: termux);
+        final runtime = RuntimeService(bundled: h.backend);
         expect(
           await runtime.selectBackendForTool('ffmpeg'),
-          'termux',
+          RuntimeService.noBackendName,
         );
         // Stage ffmpeg, then invalidate: the next selection is bundled.
         await File('${h.nativeLib.path}/libffmpeg.so').writeAsString('');

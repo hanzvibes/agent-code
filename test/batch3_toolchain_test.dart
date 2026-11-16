@@ -8,7 +8,6 @@ import 'package:code_harness/services/llm_service.dart';
 import 'package:code_harness/services/project_detector.dart';
 import 'package:code_harness/services/project_verifier.dart';
 import 'package:code_harness/services/runtime_service.dart';
-import 'package:code_harness/services/termux_runtime_service.dart';
 import 'package:code_harness/services/workspace_tool_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -74,59 +73,6 @@ class FakeBackend implements RuntimeBackend {
   }) async {
     hasToolCalls++;
     return tools.containsKey(name);
-  }
-
-  @override
-  Future<void> cancelActiveCommand() async {}
-}
-
-/// Termux adapter fake that answers `command -v` and `--version`
-/// from a tool table, for the TermuxRuntimeBackend tests.
-class FakeTermuxAdapter implements TermuxRuntimeAdapter {
-  final Map<String, String> tools;
-  final List<String> commands = [];
-
-  FakeTermuxAdapter(this.tools);
-
-  @override
-  Future<TermuxRuntimeStatus> getStatus() async =>
-      const TermuxRuntimeStatus(installed: true, permissionGranted: true);
-
-  @override
-  Future<void> openTermux() async {}
-
-  @override
-  Future<void> openAppPermissionSettings() async {}
-
-  @override
-  Future<TermuxCommandResult> execute({
-    required String command,
-    required String workspaceRoot,
-    required String workingDirectory,
-    required int timeoutSeconds,
-    void Function(String channel, String chunk)? onOutput,
-  }) async {
-    commands.add(command);
-    if (command.startsWith('command -v ')) {
-      final tool = command.substring('command -v '.length).trim();
-      return TermuxCommandResult(
-        stdout: tools.containsKey(tool) ? '/data/data/com.termux/files/usr/bin/$tool\n' : '',
-        exitCode: tools.containsKey(tool) ? 0 : 1,
-      );
-    }
-    if (command.endsWith(' --version')) {
-      final tool = command.substring(0, command.length - ' --version'.length);
-      final version = tools[tool];
-      if (version != null) {
-        return TermuxCommandResult(stdout: version, exitCode: 0);
-      }
-      return const TermuxCommandResult(
-        stdout: '',
-        stderr: 'not found',
-        exitCode: 127,
-      );
-    }
-    return TermuxCommandResult(stdout: 'ok\n', exitCode: 0);
   }
 
   @override
@@ -269,7 +215,7 @@ void main() {
       }
     });
 
-    test('python runs pytest when tests exist and py_compile on changed files',
+    test('python runs python3 -m pytest when tests exist and py_compile on changed files',
         () async {
       final dir = await _tempProject({
         'requirements.txt': 'pytest\n',
@@ -283,7 +229,7 @@ void main() {
             ProjectType.python,
             changedFiles: ['main.py', 'README.md'],
           ),
-          ['pytest', 'python -m py_compile main.py'],
+          ['python3 -m pytest', 'python3 -m py_compile main.py'],
         );
         // No changed .py files: only pytest.
         expect(
@@ -292,25 +238,31 @@ void main() {
             ProjectType.python,
             changedFiles: ['README.md'],
           ),
-          ['pytest'],
+          ['python3 -m pytest'],
         );
       } finally {
         await dir.delete(recursive: true);
       }
     });
 
-    test('go, rust and php return their standard commands', () async {
-      final dir = await _tempProject({});
+    test('go, rust and php have no verify commands (tools not bundled)',
+        () async {
+      final dir = await _tempProject({
+        'composer.json': jsonEncode({
+          'scripts': {'test': 'phpunit'},
+        }),
+      });
       try {
+        // `go`, `cargo`, `composer` and `php` are not in the bundled
+        // runtime, so verification is skipped instead of failing.
         expect(
           await ProjectDetector.verifyCommands(dir.path, ProjectType.go),
-          ['go test ./...'],
+          isEmpty,
         );
         expect(
           await ProjectDetector.verifyCommands(dir.path, ProjectType.rust),
-          ['cargo test'],
+          isEmpty,
         );
-        // PHP without a test script and no changed .php files: none.
         expect(
           await ProjectDetector.verifyCommands(dir.path, ProjectType.php),
           isEmpty,
@@ -321,27 +273,7 @@ void main() {
             ProjectType.php,
             changedFiles: ['src/Api.php'],
           ),
-          ['php -l src/Api.php'],
-        );
-      } finally {
-        await dir.delete(recursive: true);
-      }
-    });
-
-    test('php prefers composer test when the script exists', () async {
-      final dir = await _tempProject({
-        'composer.json': jsonEncode({
-          'scripts': {'test': 'phpunit'},
-        }),
-      });
-      try {
-        expect(
-          await ProjectDetector.verifyCommands(
-            dir.path,
-            ProjectType.php,
-            changedFiles: ['src/Api.php'],
-          ),
-          ['composer test'],
+          isEmpty,
         );
       } finally {
         await dir.delete(recursive: true);
@@ -386,7 +318,7 @@ void main() {
       expect(result.ok, isFalse);
       expect(result.exitCode, 127);
       expect(result.error, contains('not available yet'));
-      expect(result.error, contains('Termux'));
+      expect(result.error, isNot(contains('Termux')));
     });
 
     test('selects the bundled backend when it has the tool', () async {
@@ -394,38 +326,126 @@ void main() {
         name: 'bundled',
         tools: {'node': 'v22.0.0\n'},
       );
-      final termux = FakeBackend(name: 'termux');
-      final runtime = RuntimeService(bundled: bundled, termux: termux);
+      final runtime = RuntimeService(bundled: bundled);
       final result = await runtime.run(
         command: 'node --version',
         workspaceRoot: '/tmp',
         );
       expect(result.backend, 'bundled');
       expect(result.stdout, 'v22.0.0\n');
-      expect(termux.ranCommands, isEmpty);
     });
 
-    test('falls back to termux and records it in the result', () async {
+    test('refuses a tool the bundle does not have without running anything',
+        () async {
       final bundled = FakeBackend(name: 'bundled');
-      final termux = FakeBackend(
-        name: 'termux',
-        tools: {'node': 'v20.0.0\n'},
-      );
-      final runtime = RuntimeService(bundled: bundled, termux: termux);
+      final runtime = RuntimeService(bundled: bundled);
       final result = await runtime.run(
         command: 'node --version',
         workspaceRoot: '/tmp',
         );
-      expect(result.backend, 'termux');
-      expect(result.stdout, 'v20.0.0\n');
+      expect(result.backend, RuntimeService.noBackendName);
+      expect(result.exitCode, 127);
+      expect(result.ok, isFalse);
+      expect(result.error, contains('Tool "node" is not available'));
+      expect(result.error, contains('probe_toolchain'));
       expect(bundled.ranCommands, isEmpty);
+    });
+
+    test('compound command selects on the first real tool', () async {
+      final bundled = FakeBackend(
+        name: 'bundled',
+        tools: {'npm': 'npm 10.0.0\n'},
+        runResults: {
+          'cd x && npm install': const CommandResult(
+            stdout: 'installed\n',
+            exitCode: 0,
+            backend: 'bundled',
+          ),
+        },
+      );
+      final runtime = RuntimeService(bundled: bundled);
+      // `cd` is a builtin: the selector looks past it to `npm`.
+      final result = await runtime.run(
+        command: 'cd x && npm install',
+        workspaceRoot: '/tmp',
+        );
+      expect(result.backend, 'bundled');
+      expect(result.stdout, 'installed\n');
+      expect(bundled.ranCommands, ['cd x && npm install']);
+      // Env assignments are skipped the same way: the command still
+      // reaches the bundled backend (the fake answers `--version`
+      // only for a bare tool name, so assert routing, not output).
+      final prefixed = await runtime.run(
+        command: 'FOO=bar npm --version',
+        workspaceRoot: '/tmp',
+        );
+      expect(prefixed.backend, 'bundled');
+      expect(bundled.ranCommands, contains('FOO=bar npm --version'));
+    });
+
+    test('builtin-only commands run through the bundled shell', () async {
+      final bundled = FakeBackend(name: 'bundled');
+      final runtime = RuntimeService(bundled: bundled);
+      final result = await runtime.run(
+        command: 'echo hi',
+        workspaceRoot: '/tmp',
+        );
+      // `echo` names no tool, so there is nothing to refuse: the
+      // command reaches the bundled backend, which runs it in bash.
+      expect(result.backend, 'bundled');
+      expect(bundled.ranCommands, ['echo hi']);
+    });
+
+    test('missing tool fails with exit 127 and names the tool', () async {
+      final bundled = FakeBackend(name: 'bundled');
+      final runtime = RuntimeService(bundled: bundled);
+      final result = await runtime.run(
+        command: 'make build',
+        workspaceRoot: '/tmp',
+        );
+      expect(result.backend, RuntimeService.noBackendName);
+      expect(result.exitCode, 127);
+      expect(result.ok, isFalse);
+      expect(result.error, contains('Tool "make" is not available'));
+      expect(
+        result.error,
+        contains(
+          'Bundled tools: git, rg, node, npm, npx, python3, pip, jq, '
+          'curl, xz, tar, ffmpeg, ffprobe, bash',
+        ),
+      );
+      expect(result.error, contains('probe_toolchain'));
+      expect(bundled.ranCommands, isEmpty);
+    });
+
+    test('no Termux backend remains: selection is bundled or none',
+        () async {
+      final bundled = FakeBackend(
+        name: 'bundled',
+        tools: {'git': 'git version 2.43.0\n', 'node': 'v20.0.0\n'},
+      );
+      final runtime = RuntimeService(bundled: bundled);
+      expect(runtime.bundledBackendName, 'bundled');
+      for (final tool in ['git', 'node', 'flutter', 'make', 'cargo']) {
+        final selected = await runtime.selectBackendForTool(tool);
+        expect(
+          selected,
+          anyOf('bundled', RuntimeService.noBackendName),
+          reason: '$tool must never select termux',
+        );
+        expect(selected, isNot('termux'));
+      }
+      expect(await runtime.selectBackendForTool('git'), 'bundled');
+      expect(
+        await runtime.selectBackendForTool('flutter'),
+        RuntimeService.noBackendName,
+      );
     });
 
     test('rejects empty and oversized commands without touching a backend',
         () async {
       final bundled = FakeBackend(name: 'bundled');
-      final termux = FakeBackend(name: 'termux');
-      final runtime = RuntimeService(bundled: bundled, termux: termux);
+      final runtime = RuntimeService(bundled: bundled);
       final empty = await runtime.run(
         command: '   ',
         workspaceRoot: '/tmp',
@@ -438,15 +458,13 @@ void main() {
         );
       expect(huge.ok, isFalse);
       expect(bundled.ranCommands, isEmpty);
-      expect(termux.ranCommands, isEmpty);
     });
 
     test('probe reports available/version/backend, and missing tools',
         () async {
       final runtime = RuntimeService(
-        bundled: FakeBackend(name: 'bundled'),
-        termux: FakeBackend(
-          name: 'termux',
+        bundled: FakeBackend(
+          name: 'bundled',
           tools: {'git': 'git version 2.43.0\n', 'node': 'v20.0.0\n'},
         ),
       );
@@ -458,7 +476,7 @@ void main() {
       expect(probes[0].tool, 'git');
       expect(probes[0].available, isTrue);
       expect(probes[0].version, 'git version 2.43.0');
-      expect(probes[0].backend, 'termux');
+      expect(probes[0].backend, 'bundled');
       expect(probes[1].available, isTrue);
       expect(probes[2].available, isFalse);
       expect(probes[2].version, isNull);
@@ -467,17 +485,14 @@ void main() {
 
     test('probe rejects unsafe tool names without running anything',
         () async {
-      final termux = FakeBackend(name: 'termux');
-      final runtime = RuntimeService(
-        bundled: FakeBackend(name: 'bundled'),
-        termux: termux,
-      );
+      final bundled = FakeBackend(name: 'bundled');
+      final runtime = RuntimeService(bundled: bundled);
       final probe = await runtime.probeTool(
         'node; rm -rf /',
         workspaceRoot: '/tmp',
       );
       expect(probe.available, isFalse);
-      expect(termux.ranCommands, isEmpty);
+      expect(bundled.ranCommands, isEmpty);
     });
 
     test('invalidateToolCache makes the next run re-select', () async {
@@ -485,8 +500,7 @@ void main() {
         name: 'bundled',
         tools: {'node': 'v22.0.0\n'},
       );
-      final termux = FakeBackend(name: 'termux');
-      final runtime = RuntimeService(bundled: bundled, termux: termux);
+      final runtime = RuntimeService(bundled: bundled);
       await runtime.run(
         command: 'node --version',
         workspaceRoot: '/tmp',
@@ -506,40 +520,22 @@ void main() {
     });
   });
 
-  group('TermuxRuntimeBackend', () {
-    test('hasTool uses command -v and run records the termux backend',
-        () async {
-      final adapter = FakeTermuxAdapter({'git': 'git version 2.43.0\n'});
-      final backend = TermuxRuntimeBackend(adapter);
-      expect(await backend.hasTool('git'), isTrue);
-      expect(await backend.hasTool('cargo'), isFalse);
-      final result = await backend.run(
-        command: 'git --version',
-        workspaceRoot: '/tmp',
-        cwd: '/tmp',
-      );
-      expect(result.backend, 'termux');
-      expect(result.stdout, 'git version 2.43.0\n');
-      expect(result.ok, isTrue);
-    });
-  });
-
   group('ProjectVerifier', () {
     test('runs commands in order and stops at the first failure', () async {
       final runtime = RuntimeService(
-        bundled: FakeBackend(name: 'bundled'),
-        termux: FakeBackend(
-          name: 'termux',
+        bundled: FakeBackend(
+          name: 'bundled',
+          tools: {'npm': 'npm 10.0.0\n'},
           runResults: {
             'npm test': const CommandResult(
               stdout: 'FAIL tests\n',
               exitCode: 1,
-              backend: 'termux',
+              backend: 'bundled',
             ),
             'npm run build': const CommandResult(
               stdout: 'built\n',
               exitCode: 0,
-              backend: 'termux',
+              backend: 'bundled',
             ),
           },
         ),
@@ -560,7 +556,7 @@ void main() {
         expect(outcome.skipped, isFalse);
         expect(outcome.attempts, hasLength(1));
         expect(outcome.attempts.single.command, 'npm test');
-        expect(outcome.attempts.single.backend, 'termux');
+        expect(outcome.attempts.single.backend, 'bundled');
         expect(outcome.errorOutput, contains('FAIL tests'));
       } finally {
         await dir.delete(recursive: true);
@@ -568,40 +564,54 @@ void main() {
     });
 
     test('passes when all commands pass', () async {
-      final runtime = RuntimeService(
-        bundled: FakeBackend(name: 'bundled'),
-        termux: FakeBackend(
-          name: 'termux',
-          runResults: {
-            'go test ./...': const CommandResult(
-              stdout: 'ok\n',
-              exitCode: 0,
-              backend: 'termux',
-            ),
-          },
-        ),
-      );
-      final verifier = ProjectVerifier(runtime: runtime);
-      final outcome = await verifier.verify(
-        workspaceRoot: '/tmp',
-        projectType: ProjectType.go,
-        changedFiles: ['main.go'],
-      );
-      expect(outcome.passed, isTrue);
-      expect(outcome.skipped, isFalse);
-      expect(outcome.attempts, hasLength(1));
+      final dir = await _tempProject({
+        'package.json': jsonEncode({
+          'scripts': {'test': 'jest'},
+        }),
+      });
+      try {
+        final runtime = RuntimeService(
+          bundled: FakeBackend(
+            name: 'bundled',
+            tools: {'npm': 'npm 12.2.2\n'},
+            runResults: {
+              'npm test': const CommandResult(
+                stdout: 'PASS\n',
+                exitCode: 0,
+                backend: 'bundled',
+              ),
+            },
+          ),
+        );
+        final verifier = ProjectVerifier(runtime: runtime);
+        final outcome = await verifier.verify(
+          workspaceRoot: dir.path,
+          projectType: ProjectType.node,
+          changedFiles: ['src/a.js'],
+        );
+        expect(outcome.passed, isTrue);
+        expect(outcome.skipped, isFalse);
+        expect(outcome.attempts, hasLength(1));
+      } finally {
+        await dir.delete(recursive: true);
+      }
     });
 
-    test('skips without running anything for flutter and generic',
+    test('skips without running anything for flutter, generic, go, rust and php',
         () async {
-      final termux = FakeBackend(name: 'termux');
+      final bundled = FakeBackend(name: 'bundled');
       final verifier = ProjectVerifier(
-        runtime: RuntimeService(
-          bundled: FakeBackend(name: 'bundled'),
-          termux: termux,
-        ),
+        runtime: RuntimeService(bundled: bundled),
       );
-      for (final type in [ProjectType.flutter, ProjectType.generic]) {
+      // Go, Rust and PHP have no bundled verify tools, so they skip
+      // like Flutter/generic.
+      for (final type in [
+        ProjectType.flutter,
+        ProjectType.generic,
+        ProjectType.go,
+        ProjectType.rust,
+        ProjectType.php,
+      ]) {
         final outcome = await verifier.verify(
           workspaceRoot: '/tmp',
           projectType: type,
@@ -610,23 +620,20 @@ void main() {
         expect(outcome.skipped, isTrue);
         expect(outcome.passed, isTrue);
       }
-      expect(termux.ranCommands, isEmpty);
+      expect(bundled.ranCommands, isEmpty);
     });
 
     test('skips when no files changed', () async {
-      final termux = FakeBackend(name: 'termux');
+      final bundled = FakeBackend(name: 'bundled');
       final verifier = ProjectVerifier(
-        runtime: RuntimeService(
-          bundled: FakeBackend(name: 'bundled'),
-          termux: termux,
-        ),
+        runtime: RuntimeService(bundled: bundled),
       );
       final outcome = await verifier.verify(
         workspaceRoot: '/tmp',
         projectType: ProjectType.go,
       );
       expect(outcome.skipped, isTrue);
-      expect(termux.ranCommands, isEmpty);
+      expect(bundled.ranCommands, isEmpty);
     });
   });
 
@@ -659,7 +666,6 @@ void main() {
         final service = WorkspaceToolService(
           runtimeService: RuntimeService(
             bundled: FakeBackend(name: 'bundled'),
-            termux: FakeBackend(name: 'termux'),
           ),
         );
         final result = await service.execute(
@@ -683,16 +689,13 @@ void main() {
     test('probe_toolchain probes the kind tools and reports the backend',
         () async {
       final dir = await _tempProject({'package.json': '{}'});
-      final termux = FakeBackend(
-        name: 'termux',
+      final bundled = FakeBackend(
+        name: 'bundled',
         tools: {'git': 'git version 2.43.0\n', 'node': 'v20.0.0\n'},
       );
       try {
         final service = WorkspaceToolService(
-          runtimeService: RuntimeService(
-            bundled: FakeBackend(name: 'bundled'),
-            termux: termux,
-          ),
+          runtimeService: RuntimeService(bundled: bundled),
         );
         final result = await service.execute(
           workspaceRoot: dir.path,
@@ -714,7 +717,7 @@ void main() {
         expect(byName.keys, containsAll(['git', 'rg', 'node', 'npm']));
         expect(byName['git']!['available'], isTrue);
         expect(byName['git']!['version'], 'git version 2.43.0');
-        expect(byName['git']!['backend'], 'termux');
+        expect(byName['git']!['backend'], 'bundled');
         expect(byName['rg']!['available'], isFalse);
         expect(byName['node']!['available'], isTrue);
       } finally {
@@ -722,33 +725,38 @@ void main() {
       }
     });
 
-    test('run_project_command still refuses non-shared-storage workspaces',
+    test('run_project_command runs in an app-private workspace via bundled',
         () async {
       final dir = await _tempProject({'package.json': '{}'});
-      final termux = FakeBackend(
-        name: 'termux',
-        tools: {'echo': 'echo\n'},
+      final bundled = FakeBackend(
+        name: 'bundled',
+        tools: {'git': 'git version 2.43.0\n'},
+        runResults: {
+          'git status': const CommandResult(
+            stdout: 'On branch main\n',
+            exitCode: 0,
+            backend: 'bundled',
+          ),
+        },
       );
       try {
         final service = WorkspaceToolService(
-          runtimeService: RuntimeService(
-            bundled: FakeBackend(name: 'bundled'),
-            termux: termux,
-          ),
+          runtimeService: RuntimeService(bundled: bundled),
         );
         final result = await service.execute(
           workspaceRoot: dir.path,
           call: const ToolCallInfo(
             id: 'r1',
             name: 'run_project_command',
-            arguments: '{"command": "echo hi"}',
+            arguments: '{"command": "git status"}',
           ),
         );
-        // Termux can only see shared storage: the tool refuses before
-        // the runtime is touched (no /storage/emulated/0 in tests).
-        expect(result.isError, isTrue);
-        expect(result.output, contains('shared storage'));
-        expect(termux.ranCommands, isEmpty);
+        // No shared-storage gate any more: the app-private temp dir
+        // is a valid workspace and the command runs via bundled.
+        expect(result.isError, isFalse);
+        expect(result.output, contains('"backend":"bundled"'));
+        expect(result.output, contains('On branch main'));
+        expect(bundled.ranCommands, ['git status']);
       } finally {
         await dir.delete(recursive: true);
       }
@@ -799,14 +807,14 @@ void main() {
 
     ProjectVerifier failingVerifier() => ProjectVerifier(
       runtime: RuntimeService(
-        bundled: FakeBackend(name: 'bundled'),
-        termux: FakeBackend(
-          name: 'termux',
+        bundled: FakeBackend(
+          name: 'bundled',
+          tools: {'python3': 'Python 3.14\n'},
           runResults: {
-            'pytest': const CommandResult(
+            'python3 -m pytest': const CommandResult(
               stdout: 'FAILED test_main.py::test_x\nAssertionError\n',
               exitCode: 1,
-              backend: 'termux',
+              backend: 'bundled',
             ),
           },
         ),
@@ -821,19 +829,19 @@ void main() {
       try {
         final verifier = ProjectVerifier(
           runtime: RuntimeService(
-            bundled: FakeBackend(name: 'bundled'),
-            termux: FakeBackend(
-              name: 'termux',
+            bundled: FakeBackend(
+              name: 'bundled',
+              tools: {'python3': 'Python 3.14\n'},
               runResults: {
-                'pytest': const CommandResult(
+                'python3 -m pytest': const CommandResult(
                   stdout: '1 passed\n',
                   exitCode: 0,
-                  backend: 'termux',
+                  backend: 'bundled',
                 ),
-                'python -m py_compile main.py': const CommandResult(
+                'python3 -m py_compile main.py': const CommandResult(
                   stdout: '',
                   exitCode: 0,
-                  backend: 'termux',
+                  backend: 'bundled',
                 ),
               },
             ),
@@ -929,12 +937,9 @@ void main() {
     test('verify never runs for a flutter project', () async {
       final dir = await _tempProject({'pubspec.yaml': 'name: x\n'});
       try {
-        final termux = FakeBackend(name: 'termux');
+        final bundled = FakeBackend(name: 'bundled');
         final verifier = ProjectVerifier(
-          runtime: RuntimeService(
-            bundled: FakeBackend(name: 'bundled'),
-            termux: termux,
-          ),
+          runtime: RuntimeService(bundled: bundled),
         );
         final llm = ScriptedLlmService([
           LlmStreamResponse(
@@ -960,7 +965,7 @@ void main() {
           ),
         );
         expect(result.stopReason, AgentStopReason.finished);
-        expect(termux.ranCommands, isEmpty);
+        expect(bundled.ranCommands, isEmpty);
         expect(llm.requestCount, 2);
       } finally {
         await dir.delete(recursive: true);
@@ -973,12 +978,9 @@ void main() {
         'tests/test_main.py': 'def test_x(): pass\n',
       });
       try {
-        final termux = FakeBackend(name: 'termux');
+        final bundled = FakeBackend(name: 'bundled');
         final verifier = ProjectVerifier(
-          runtime: RuntimeService(
-            bundled: FakeBackend(name: 'bundled'),
-            termux: termux,
-          ),
+          runtime: RuntimeService(bundled: bundled),
         );
         final llm = ScriptedLlmService([_finishCall('c1')]);
         final result = await runEngine(
@@ -987,7 +989,7 @@ void main() {
           workspace: dir,
         );
         expect(result.stopReason, AgentStopReason.finished);
-        expect(termux.ranCommands, isEmpty);
+        expect(bundled.ranCommands, isEmpty);
         expect(llm.requestCount, 1);
       } finally {
         await dir.delete(recursive: true);
