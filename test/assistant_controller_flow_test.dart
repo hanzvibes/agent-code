@@ -66,6 +66,7 @@ class FakeLlmService extends LlmService {
   final List<LlmStreamResponse> scriptResponses = [];
   int requestCount = 0;
   List<Map<String, dynamic>> lastMessages = [];
+  List<Map<String, dynamic>> lastTools = [];
   double? lastTemperature;
   int? lastMaxTokens;
 
@@ -82,6 +83,7 @@ class FakeLlmService extends LlmService {
   }) async {
     requestCount++;
     lastMessages = List.from(messages);
+    lastTools = List.from(tools ?? []);
     lastTemperature = temperature;
     lastMaxTokens = maxTokens;
 
@@ -329,4 +331,26 @@ void main() {
       expect(saved.length, 2);
     },
   );
+
+  test('Termux-enabled install requests are execution-first', () async {
+    assistantController.enableTermuxRuntime.value = true;
+
+    await assistantController.sendMessage('Install Remotion in this project');
+
+    expect(
+      llmService.lastTools.map((tool) => tool['function']['name']),
+      contains('run_project_command'),
+    );
+    final systemMessage = llmService.lastMessages.firstWhere(
+      (message) => message['role'] == 'system',
+    );
+    final systemPrompt = systemMessage['content'] as String;
+    expect(systemPrompt, contains('do not substitute a tutorial'));
+    expect(systemPrompt, contains('Node.js for Remotion/npm tasks'));
+    expect(
+      systemPrompt,
+      contains('routine toolchain and project-package installation'),
+    );
+    expect(systemPrompt, contains('bounded to 120 seconds'));
+  });
 }

@@ -1426,10 +1426,10 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
               AppCard(
                 child: Text(
                   '1. Install and open Termux once (version 0.109 or newer).\n'
-                  '2. In Termux, install the bounded-timeout utility and any runtimes you need, for example: pkg install coreutils nodejs python git\n'
-                  '3. Run termux-setup-storage, and keep the project under shared storage such as /storage/emulated/0.\n'
-                  '4. In ~/.termux/termux.properties, set allow-external-apps = true, then restart Termux.\n'
-                  '5. Grant Code Harness the Android permission “Run commands in Termux environment” in its app permissions.',
+                  '2. Run termux-setup-storage, and keep the project under shared storage such as /storage/emulated/0.\n'
+                  '3. In ~/.termux/termux.properties, set allow-external-apps = true, then restart Termux.\n'
+                  '4. Grant Code Harness the Android permission “Run commands in Termux environment” in its app permissions.\n'
+                  'You do not need to preinstall Node.js, Python, or other development runtimes: when this session has Termux enabled, the agent can inspect the task and install only the missing tools it needs. It will execute requested installs and commands directly, then report real output.',
                   style: t.small,
                 ),
               ),

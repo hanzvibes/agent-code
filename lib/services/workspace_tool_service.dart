@@ -119,7 +119,7 @@ class WorkspaceToolService {
       'function': {
         'name': 'run_project_command',
         'description':
-            'Runtime tools: runs one shell command through the user-enabled Termux environment in the open project or a project-relative subfolder. Use for builds, tests, Git, Node/npm, Python, or network-enabled development tasks. The command can change files and access Termux-visible device files/network; use only when needed, inspect the result, and report its exit code. Do not use this as a substitute for a reviewable code diff when proposing source edits.',
+            'Runs one shell command through the user-enabled Termux environment in the open project or a project-relative subfolder. For a concrete user request to install, build, test, or run something, execute the task instead of giving a tutorial: inspect the environment, install only missing task-relevant prerequisites through Termux pkg, install requested project dependencies with the existing package manager, then run and verify the task. Routine installs explicitly requested by the user do not need another confirmation. Use only relevant prerequisites (for example, Node.js/npm for Remotion; Python only when needed). Commands can change files and access Termux-visible device files/network. Ask before destructive/high-impact actions or sending private data off-device. Return actual output and exit status; do not claim work that was not run. Commands are bounded to 1–120 seconds, 32 KB, and 16 KB output per stream.',
         'parameters': {
           'type': 'object',
           'properties': {
