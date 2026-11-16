@@ -134,6 +134,24 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dev.codeharness/bundled_runtime")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    // Tier 2 bundled runtime: the Dart side needs the
+                    // native library dir (the only executable location
+                    // since Android 10) plus the app-private dirs the
+                    // engine layout (tools/bin, git-core, home, …) is
+                    // built under. All setup/symlinking runs in Dart.
+                    "getRuntimePaths" -> result.success(
+                        mapOf(
+                            "nativeLibraryDir" to applicationInfo.nativeLibraryDir,
+                            "filesDir" to filesDir.absolutePath,
+                            "cacheDir" to cacheDir.absolutePath,
+                        ),
+                    )
+                    else -> result.notImplemented()
+                }
+            }
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dev.codeharness/android_actions")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
