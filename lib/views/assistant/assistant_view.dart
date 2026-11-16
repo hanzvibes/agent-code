@@ -19,6 +19,7 @@ import '../../utils/unified_patch.dart';
 import '../../widgets/markdown_message_view.dart';
 import '../review/review_view.dart';
 import '../settings/provider_form_view.dart';
+import 'task_panel.dart';
 
 class AssistantView extends StatefulWidget {
   const AssistantView({super.key});
@@ -110,6 +111,12 @@ class _AssistantViewState extends State<AssistantView> {
         return Column(
           children: [
             _ContextBanner(projCtrl: projCtrl, ctrl: ctrl),
+            if (ctrl.activeTask.value != null)
+              TaskPanel(
+                task: ctrl.activeTask.value!,
+                isRunning: ctrl.isLoading.value,
+                onStop: ctrl.stopAgent,
+              ),
             Expanded(
               child: ctrl.isRestoringSession.value
                   ? Center(
