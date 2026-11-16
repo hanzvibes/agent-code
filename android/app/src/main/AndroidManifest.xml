@@ -10,7 +10,8 @@
         android:label="Code Harness"
         android:name="${applicationName}"
         android:icon="@drawable/ic_harness"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="true"
+        android:extractNativeLibs="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"
