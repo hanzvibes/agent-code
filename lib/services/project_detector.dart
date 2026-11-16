@@ -122,15 +122,16 @@ class ProjectDetector {
   ///
   /// Only the project's own check commands — never an APK build or
   /// test. Returns an empty list when the kind has no automatic
-  /// verify (Flutter/Android, generic).
+  /// verify (Flutter/Android, generic) or when its tools are not in
+  /// the bundled runtime (Go, Rust, PHP — their `go`/`cargo`/
+  /// `composer`/`php` binaries are not bundled, so verification is
+  /// skipped rather than failing every run).
   ///
   /// - Node: `npm test` when the `test` script exists, then
   ///   `npm run build` when the `build` script exists.
-  /// - Python: `pytest` when the project has tests, then
-  ///   `python -m py_compile` for each changed `.py` file.
-  /// - Go: `go test ./...`; Rust: `cargo test`.
-  /// - PHP: `composer test` when the `test` script exists, otherwise
-  ///   `php -l` for each changed `.php` file.
+  /// - Python: `python3 -m pytest` when the project has tests, then
+  ///   `python3 -m py_compile` for each changed `.py` file
+  ///   (`pytest`/`python` are not bundled tools — only `python3`).
   static Future<List<String>> verifyCommands(
     String workspaceRoot,
     ProjectType type, {
@@ -155,30 +156,22 @@ class ProjectDetector {
       case ProjectType.python:
         final commands = <String>[];
         if (await _hasPythonTests(workspaceRoot)) {
-          commands.add('pytest');
+          commands.add('python3 -m pytest');
         }
         final changedPy = changedFiles
             .where((file) => file.endsWith('.py'))
             .toList();
         if (changedPy.isNotEmpty) {
-          commands.add('python -m py_compile ${changedPy.join(' ')}');
+          commands.add('python3 -m py_compile ${changedPy.join(' ')}');
         }
         return commands;
       case ProjectType.go:
-        return ['go test ./...'];
       case ProjectType.rust:
-        return ['cargo test'];
       case ProjectType.php:
-        final scripts = await _readScripts(
-          workspaceRoot,
-          'composer.json',
-        );
-        if (scripts.contains('test')) return ['composer test'];
-        final changedPhp = changedFiles
-            .where((file) => file.endsWith('.php'))
-            .toList();
-        if (changedPhp.isEmpty) return [];
-        return changedPhp.map((file) => 'php -l $file').toList();
+        // No verify: `go`, `cargo`, `composer` and `php` are not in
+        // the bundled runtime. Skipped like Flutter/generic instead
+        // of failing every run with "tool not available".
+        return [];
     }
   }
 

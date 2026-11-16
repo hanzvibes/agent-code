@@ -15,7 +15,6 @@ import '../../services/android_native_action_service.dart';
 import '../../services/permission_service.dart';
 import '../../models/chat_message.dart';
 import '../../models/file_node.dart';
-import '../../services/termux_runtime_service.dart';
 import '../../services/workspace_service.dart';
 import '../../utils/unified_patch.dart';
 import '../../widgets/markdown_message_view.dart';
@@ -1417,9 +1416,6 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
   late double? _temp;
   late int? _maxTokens;
   late AgentMode _mode;
-  final TermuxRuntimeService _termuxRuntime = TermuxRuntimeService();
-  TermuxRuntimeStatus? _termuxStatus;
-  bool _loadingTermuxStatus = true;
 
   @override
   void initState() {
@@ -1427,111 +1423,8 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
     _temp = widget.ctrl.sessionTemperature.value;
     _maxTokens = widget.ctrl.sessionMaxTokens.value;
     _mode = widget.ctrl.agentMode.value;
-    _refreshTermuxStatus();
   }
 
-  Future<void> _refreshTermuxStatus() async {
-    try {
-      final status = await _termuxRuntime.getStatus();
-      if (mounted) setState(() => _termuxStatus = status);
-    } catch (_) {
-      if (mounted) setState(() => _termuxStatus = null);
-    } finally {
-      if (mounted) setState(() => _loadingTermuxStatus = false);
-    }
-  }
-
-  void _showTermuxSetup(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      builder: (sheetContext) {
-        final t = AppTokens.of(sheetContext);
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.78,
-          maxChildSize: 0.95,
-          builder: (_, scrollCtrl) => ListView(
-            controller: scrollCtrl,
-            padding: const EdgeInsets.all(20),
-            children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: t.sheetHandle,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text('Set up Termux runtime', style: t.title),
-              const SizedBox(height: 8),
-              Text(
-                _loadingTermuxStatus
-                    ? 'Checking Termux…'
-                    : _termuxStatus == null
-                    ? 'Could not read Termux status on this device.'
-                    : !_termuxStatus!.installed
-                    ? 'Termux is not installed.'
-                    : _termuxStatus!.permissionGranted
-                    ? 'Termux is installed and the Android command permission is granted. Finish the Termux settings below if needed.'
-                    : 'Termux is installed, but Code Harness still needs the Android command permission.',
-                style: t.caption,
-              ),
-              const SizedBox(height: 16),
-              AppNotice(
-                'Commands run as Termux, not inside an OS sandbox. They can modify project files and use Termux-visible storage and networking. Keep this switch off unless you trust the configured AI provider.',
-                icon: Icons.shield_outlined,
-              ),
-              const SizedBox(height: 16),
-              SectionHeader('One-time setup'),
-              AppCard(
-                child: Text(
-                  '1. Install and open Termux once (version 0.109 or newer).\n'
-                  '2. Run termux-setup-storage, and keep the project under shared storage such as /storage/emulated/0.\n'
-                  '3. In ~/.termux/termux.properties, set allow-external-apps = true, then restart Termux.\n'
-                  '4. Grant Code Harness the Android permission “Run commands in Termux environment” in its app permissions.\n'
-                  'You do not need to preinstall Node.js, Python, or other development runtimes: when this session has Termux enabled, the agent can inspect the task and install only the missing tools it needs. It will execute requested installs and commands directly, then report real output.',
-                  style: t.small,
-                ),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                onPressed: _termuxStatus?.installed == true
-                    ? () async {
-                        Navigator.of(sheetContext).pop();
-                        try {
-                          await _termuxRuntime.openTermux();
-                        } catch (_) {}
-                      }
-                    : null,
-                icon: const Icon(Icons.terminal_rounded),
-                label: const Text('Open Termux'),
-              ),
-              OutlinedButton.icon(
-                onPressed: () async {
-                  Navigator.of(sheetContext).pop();
-                  try {
-                    await _termuxRuntime.openAppPermissionSettings();
-                  } catch (_) {}
-                },
-                icon: const Icon(Icons.settings_outlined),
-                label: const Text('Open Code Harness app settings'),
-              ),
-              TextButton.icon(
-                onPressed: _refreshTermuxStatus,
-                icon: const Icon(Icons.refresh_rounded),
-                label: const Text('Refresh status'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1688,36 +1581,6 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
             ),
           ),
           const SizedBox(height: 20),
-          SectionHeader('Termux Runtime'),
-          AppCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                AppNotice(
-                  'Commands run with Termux permissions and network access; they can modify or delete files directly, outside diff review. Each run is limited to 1–120 seconds, 32 KB of command text, and 16 KB of returned output per stream.',
-                  icon: Icons.warning_amber_rounded,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  _loadingTermuxStatus
-                      ? 'Checking Termux status…'
-                      : _termuxStatus == null
-                      ? 'Termux status is unavailable.'
-                      : !_termuxStatus!.installed
-                      ? 'Termux is not installed.'
-                      : _termuxStatus!.permissionGranted
-                      ? 'Termux found • Android command permission granted'
-                      : 'Termux found • Android command permission still needed',
-                  style: t.small,
-                ),
-                TextButton.icon(
-                  onPressed: () => _showTermuxSetup(context),
-                  icon: const Icon(Icons.settings_outlined),
-                  label: const Text('Termux setup & permissions'),
-                ),
-              ],
-            ),
-          ),
           const SizedBox(height: 16),
           Text(
             'Each task has 25 rounds and 60 tool calls. The mode applies to the next step, including a task that is already running.',

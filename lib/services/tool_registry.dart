@@ -186,7 +186,7 @@ class ToolRegistry {
       'function': {
         'name': 'probe_toolchain',
         'description':
-            'Checks which tools are available on the runtime and their versions, by running "<tool> --version" for each. Without a "tools" argument it probes the tools relevant to the detected project kind plus git and rg. Returns one entry per tool: tool, available, version, backend (bundled or termux). Needs the runtime enabled.',
+            'Checks which tools are available on the runtime and their versions, by running "<tool> --version" for each. Without a "tools" argument it probes the tools relevant to the detected project kind plus git and rg. Returns one entry per tool: tool, available, version, backend (bundled). Needs the runtime enabled.',
         'parameters': {
           'type': 'object',
           'properties': {

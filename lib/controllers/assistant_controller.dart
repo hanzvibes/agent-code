@@ -589,7 +589,7 @@ class AssistantController extends GetxController {
           if (mode != AgentMode.plan) {
             // Write tools from the single registry (Batch 2).
             tools.addAll(ToolRegistry.writeToolDefinitions);
-            tools.addAll(WorkspaceToolService.termuxToolDefinitions);
+            tools.addAll(WorkspaceToolService.runtimeToolDefinitions);
           }
         }
         tools.addAll(WorkspaceToolService.androidActionToolDefinitions);
@@ -854,8 +854,8 @@ class AssistantController extends GetxController {
             .where((line) => line.trim().isNotEmpty)
             .toList();
         statusMessage.value = nonEmptyLines.isEmpty
-            ? 'Termux • streaming $channel'
-            : 'Termux • $channel: ${nonEmptyLines.last.trim()}';
+            ? 'Bundled • streaming $channel'
+            : 'Bundled • $channel: ${nonEmptyLines.last.trim()}';
       },
       confirmAndroidAction: onAndroidActionApproval,
     );
@@ -907,7 +907,7 @@ class AssistantController extends GetxController {
         }
       }
     } catch (_) {}
-    if (call.name == 'run_project_command') return 'termux';
+    if (call.name == 'run_project_command') return 'bundled';
     return 'bundled';
   }
 
@@ -1007,7 +1007,7 @@ class AssistantController extends GetxController {
           'Write tools: write_file, edit_file, create_file, delete_file. Edits apply directly and are recorded with their before/after content, so the user can undo any step from the change history. edit_file needs the old text to match exactly once. delete_file moves the file to a trash folder inside the project instead of deleting it; it is only permanently removed when the task finishes.',
         );
         toolGroups.add(
-          'Termux runtime: run_project_command. Use only for a concrete build, test, Git, Node/npm, Python, or network task. Output streams live and final stdout, stderr, and exit code are returned to you. Commands have Termux permissions, can change files, and are not sandboxed; prefer reviewable unified-diff proposals for source edits when appropriate. In Agent mode the app asks the user to approve destructive, network-out, install, and blocked-list commands before they run; in Auto mode they run without asking (except the blocked list).',
+          'Bundled runtime: run_project_command. Use only for a concrete build, test, Git, Node/npm, Python, or network task. Output streams live and final stdout, stderr, and exit code are returned to you. Commands run through the bundled runtime with its pre-installed tools (git, Node/npm, Python, rg, jq, curl, xz, tar, ffmpeg, bash, and common system applets); there is no package manager and no way to install a missing tool — if a tool is missing, say so and use a bundled alternative instead of promising an install. Commands can change files and are not sandboxed; prefer reviewable unified-diff proposals for source edits when appropriate. In Agent mode the app asks the user to approve destructive, network-out, install, and blocked-list commands before they run; in Auto mode they run without asking (except the blocked list).',
         );
       }
     }
@@ -1022,7 +1022,7 @@ class AssistantController extends GetxController {
     final executionPolicy = mode != AgentMode.plan && hasWorkspace
         ? '''
 
-Execution-first policy: The user expects you to perform concrete development tasks, not explain how to do them. When the Termux tool is enabled, use it for requested installs, builds, tests, and runs; do not substitute a tutorial or commands for the user to copy. For an install request, inspect the workspace and runtime, identify only missing prerequisites relevant to the task, install those through Termux's package manager (for example, Node.js for Remotion/npm tasks; install Python only if the task needs it), install the requested dependency in the open project with its existing package manager, then run or verify the requested task and continue from actual output. The user's request authorizes routine toolchain and project-package installation for that task; do not ask for separate confirmation for each routine command. Ask first only for destructive or high-impact actions (such as broad deletion, overwriting/recreating existing work, or changes outside the project) or sending private data outside the device. Never claim success without command output. Each command is bounded to 120 seconds; split longer work into short calls, inspect results, and stay within the task budget (${_appController.prefs.value.defaultMaxRounds} rounds and ${_appController.prefs.value.defaultMaxToolCalls} tool calls per task). If runtime setup, permissions, or workspace visibility block execution, state the exact blocker instead of giving a manual installation tutorial.'''
+Execution-first policy: The user expects you to perform concrete development tasks, not explain how to do them. When the bundled runtime tool is enabled, use it for requested builds, tests, and runs; do not substitute a tutorial or commands for the user to copy. The runtime is bundled-only: the tools shipped in the app (git, Node/npm, Python, rg, jq, curl, xz, tar, ffmpeg, bash, and common system applets) are all there is — there is no package manager and no way to install a missing runtime tool, so never promise to install one; if a task needs a tool that is not bundled, say so, and try a bundled alternative first. For an install request, inspect the workspace and runtime, install only the requested project dependency with its existing package manager (npm/pip), then run or verify the requested task and continue from actual output. The user's request authorizes routine project-package installation for that task; do not ask for separate confirmation for each routine command. Ask first only for destructive or high-impact actions (such as broad deletion, overwriting/recreating existing work, or changes outside the project) or sending private data outside the device. Never claim success without command output. Each command is bounded to 120 seconds; split longer work into short calls, inspect results, and stay within the task budget (${_appController.prefs.value.defaultMaxRounds} rounds and ${_appController.prefs.value.defaultMaxToolCalls} tool calls per task). If runtime setup, permissions, or workspace visibility block execution, state the exact blocker instead of giving a manual installation tutorial.'''
         : '';
 
     // Agent workflow (Batch 1, desain D3): plan first, work one step at

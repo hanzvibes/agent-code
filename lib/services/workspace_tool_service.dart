@@ -10,7 +10,6 @@ import 'permission_service.dart';
 import 'project_detector.dart';
 import 'runtime_service.dart';
 import 'search_service.dart';
-import 'termux_runtime_service.dart';
 import 'tool_registry.dart';
 import 'workspace_service.dart';
 
@@ -61,21 +60,17 @@ class WorkspaceToolService {
   final SearchService _searchService;
 
   /// Single entry point for all command execution (Batch 3 — desain
-  /// D5). A [TermuxRuntimeAdapter] passed in is wrapped in a
-  /// [TermuxRuntimeBackend] so existing callers keep working; pass a
-  /// [RuntimeService] directly to control both backends.
+  /// D5). Pass a [RuntimeService] directly to control the backend;
+  /// the default runs commands through the bundled runtime.
   final RuntimeService _runtime;
   final AndroidNativeActionAdapter _androidActions;
 
   WorkspaceToolService({
     SearchService? searchService,
-    TermuxRuntimeAdapter? termuxRuntime,
     RuntimeService? runtimeService,
     AndroidNativeActionAdapter? androidActions,
   }) : _searchService = searchService ?? SearchService(),
-       _runtime =
-           runtimeService ??
-           RuntimeService(termux: TermuxRuntimeBackend(termuxRuntime)),
+       _runtime = runtimeService ?? RuntimeService(),
        _androidActions = androidActions ?? AndroidNativeActionService();
 
   /// Read-only workspace tools. The full set (read + write) lives in
@@ -83,19 +78,19 @@ class WorkspaceToolService {
   static const List<Map<String, dynamic>> toolDefinitions =
       ToolRegistry.readToolDefinitions;
 
-  static const List<Map<String, dynamic>> termuxToolDefinitions = [
+  static const List<Map<String, dynamic>> runtimeToolDefinitions = [
     {
       'type': 'function',
       'function': {
         'name': 'run_project_command',
         'description':
-            'Runs one shell command through the runtime in the open project or a project-relative subfolder (Termux backend for now; bundled tools later — the runtime picks the backend and records it in the result). For a concrete user request to install, build, test, or run something, execute the task instead of giving a tutorial: inspect the environment, install only missing task-relevant prerequisites through Termux pkg, install requested project dependencies with the existing package manager, then run and verify the task. Routine installs explicitly requested by the user do not need another confirmation. Use only relevant prerequisites (for example, Node.js/npm for Remotion; Python only when needed). Commands can change files and access Termux-visible device files/network. Ask before destructive/high-impact actions or sending private data off-device. Return actual output and exit status; do not claim work that was not run. Commands are bounded to 1–120 seconds, 32 KB, and 16 KB output per stream.',
+            'Runs one shell command through the bundled runtime in the open project or a project-relative subfolder (the runtime picks the backend and records it in the result). For a concrete user request to build, test, or run something, execute the task instead of giving a tutorial: inspect the environment, then run and verify the task. Only the pre-installed bundled tools are available (git, Node/npm, Python, rg, jq, curl, xz, tar, ffmpeg, bash, and common system applets such as ls/grep/sed); there is no package manager and no way to install a missing tool, so do not promise installs — if a tool is missing, say so and suggest an alternative that uses the bundled tools. Use the existing project package manager (npm/pip) only to install requested project dependencies, not runtimes. Routine installs explicitly requested by the user do not need another confirmation. Commands can change files and access device files/network. Ask before destructive/high-impact actions or sending private data off-device. Return actual output and exit status; do not claim work that was not run. Commands are bounded to 1–120 seconds, 32 KB, and 16 KB output per stream.',
         'parameters': {
           'type': 'object',
           'properties': {
             'command': {
               'type': 'string',
-              'description': 'Shell command to run in Termux.',
+              'description': 'Shell command to run in the bundled runtime.',
             },
             'working_directory': {
               'type': 'string',
@@ -308,7 +303,7 @@ class WorkspaceToolService {
       case 'run_project_command':
         // Permission-checked above (Batch 4): Plan denies it, Agent
         // asks for dangerous commands, Auto runs them.
-        return _executeTermuxCommand(
+        return _executeRuntimeCommand(
           workspaceRoot,
           call,
           onRuntimeOutput: onRuntimeOutput,
@@ -354,7 +349,7 @@ class WorkspaceToolService {
     isError: true,
   );
 
-  Future<ToolExecutionResult> _executeTermuxCommand(
+  Future<ToolExecutionResult> _executeRuntimeCommand(
     String workspaceRoot,
     ToolCallInfo call, {
     void Function(String channel, String chunk)? onRuntimeOutput,
@@ -372,7 +367,7 @@ class WorkspaceToolService {
       if (command.isEmpty) {
         return _toolError(call, 'Command cannot be empty.', 'Empty command');
       }
-      if (command.length > TermuxRuntimeService.maxCommandChars) {
+      if (command.length > RuntimeService.maxCommandChars) {
         return _toolError(
           call,
           'Command exceeds 32,000 characters.',
@@ -380,13 +375,6 @@ class WorkspaceToolService {
         );
       }
       final root = await Directory(workspaceRoot).resolveSymbolicLinks();
-      if (!isTermuxSharedStoragePath(root)) {
-        return _toolError(
-          call,
-          'Termux can only work with a project under shared storage (for example /storage/emulated/0). Reopen or move this project there, then run termux-setup-storage in Termux.',
-          'Workspace is not in Termux-visible shared storage',
-        );
-      }
       final rawCwd = (args['working_directory'] as String? ?? '').trim();
       final cwdSegments = rawCwd.isEmpty || rawCwd == '.'
           ? <String>[]
@@ -431,8 +419,8 @@ class WorkspaceToolService {
           : 30;
       final timeout = requestedTimeout
           .clamp(
-            TermuxRuntimeService.minTimeoutSeconds,
-            TermuxRuntimeService.maxTimeoutSeconds,
+            RuntimeService.minTimeoutSeconds,
+            RuntimeService.maxTimeoutSeconds,
           )
           .toInt();
       final result = await _runtime.run(
@@ -453,8 +441,8 @@ class WorkspaceToolService {
     } catch (error) {
       return _toolError(
         call,
-        'Termux command failed: $error',
-        'Termux command failed',
+        'Runtime command failed: $error',
+        'Runtime command failed',
       );
     }
   }

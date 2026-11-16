@@ -452,8 +452,8 @@ void main() {
         expect(asked, 1);
         expect(result.isError, isTrue);
         expect(result.output, contains('declined'));
-        // Never reached the runtime: no shared-storage complaint either.
-        expect(result.output, isNot(contains('shared storage')));
+        // Never reached the runtime: no backend field in the output.
+        expect(result.output, isNot(contains('backend')));
       },
     );
 
@@ -475,9 +475,10 @@ void main() {
       );
       expect(asked, 1);
       // The command passed the permission gate and reached the
-      // Termux workspace check (the temp dir is not shared storage),
-      // which proves it was not stopped by permissions.
-      expect(result.output, contains('shared storage'));
+      // bundled runtime, which proves it was not stopped by
+      // permissions. (In unit tests the bundle is not staged, so the
+      // runtime reports the tool as not available.)
+      expect(result.output, contains('not available in the bundled runtime'));
     });
 
     test(
@@ -502,7 +503,10 @@ void main() {
             arguments: '{"command":"npm install express"}',
           ),
         );
-        expect(first.output, contains('shared storage'));
+        expect(
+          first.output,
+          contains('not available in the bundled runtime'),
+        );
 
         final perms = await service.permissionsFor(tempDir.path);
         final second = await toolService.execute(
@@ -518,7 +522,10 @@ void main() {
           ),
         );
         expect(asked, 1);
-        expect(second.output, contains('shared storage'));
+        expect(
+          second.output,
+          contains('not available in the bundled runtime'),
+        );
       },
     );
   });
