@@ -1,0 +1,28 @@
+name: code_harness
+description: Code Harness — an Android-first coding workspace with AI assistance.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  get: ^4.7.2
+  google_fonts: ^6.2.1
+  hive_flutter: ^1.1.0
+  flutter_secure_storage: ^9.2.4
+  file_picker: ^8.3.7
+  http: ^1.4.0
+  path: ^1.9.1
+  path_provider: ^2.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
