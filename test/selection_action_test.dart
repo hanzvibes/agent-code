@@ -40,6 +40,7 @@ class _FakeLlmService extends LlmService {
     double? temperature,
     int? maxTokens,
     void Function(String delta)? onDelta,
+    void Function(int index, String id, String name)? onToolCallName,
   }) async {
     return const LlmStreamResponse(text: 'Analysis response');
   }

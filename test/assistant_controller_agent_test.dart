@@ -77,6 +77,7 @@ class FakeLlmService extends LlmService {
     double? temperature,
     int? maxTokens,
     void Function(String delta)? onDelta,
+    void Function(int index, String id, String name)? onToolCallName,
   }) async {
     requestCount++;
     lastMessages = List.from(messages);

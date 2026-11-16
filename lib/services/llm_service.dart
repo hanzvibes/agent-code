@@ -147,6 +147,14 @@ class LlmService {
     double? temperature,
     int? maxTokens,
     void Function(String delta)? onDelta,
+
+    /// Fired the moment a streamed tool-call chunk first names a tool
+    /// (Batch 6 — desain D10): the UI can show the tool name live
+    /// instead of waiting for the whole response. Arguments arrive in
+    /// later chunks, so only the call index, id, and name are given.
+    /// Not fired for the non-stream JSON fallback (those calls arrive
+    /// complete at the end and are returned in the response).
+    void Function(int index, String id, String name)? onToolCallName,
   }) async {
     final uri = profile.chatCompletionsUri;
     final headers = <String, String>{
@@ -201,6 +209,7 @@ class LlmService {
 
       final textBuffer = StringBuffer();
       final toolAccumulators = <int, _ToolCallAccumulator>{};
+      final reportedToolCallNames = <int>{};
       bool isNonStreamJson = false;
       final rawJsonBuffer = StringBuffer();
 
@@ -259,6 +268,13 @@ class LlmService {
                           () => _ToolCallAccumulator(idx),
                         );
                         acc.merge(tc);
+                        // Live tool name (Batch 6 — desain D10): report
+                        // the name as soon as the first chunk carries it.
+                        if (onToolCallName != null &&
+                            acc.name.isNotEmpty &&
+                            reportedToolCallNames.add(idx)) {
+                          onToolCallName(idx, acc.id, acc.name);
+                        }
                       }
                     }
                   }

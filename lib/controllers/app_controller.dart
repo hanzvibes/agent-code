@@ -103,5 +103,37 @@ class AppController extends GetxController {
     prefs.refresh();
   }
 
+  /// Default per-task budget for new agent tasks (Batch 6 — desain
+  /// D7). Clamped so a task can always run at least one round and
+  /// never silently get an unbounded budget. Applies to tasks
+  /// created after the change; a running task keeps its own limits.
+  static const int minDefaultMaxRounds = 1;
+  static const int maxDefaultMaxRounds = 100;
+  static const int minDefaultMaxToolCalls = 1;
+  static const int maxDefaultMaxToolCalls = 500;
+
+  int get defaultMaxRounds => prefs.value.defaultMaxRounds;
+
+  int get defaultMaxToolCalls => prefs.value.defaultMaxToolCalls;
+
+  Future<void> setDefaultMaxRounds(int value) async {
+    final p = prefs.value;
+    p.defaultMaxRounds = value.clamp(minDefaultMaxRounds, maxDefaultMaxRounds);
+    await _prefsRepo.save(p);
+    prefs.refresh();
+    update();
+  }
+
+  Future<void> setDefaultMaxToolCalls(int value) async {
+    final p = prefs.value;
+    p.defaultMaxToolCalls = value.clamp(
+      minDefaultMaxToolCalls,
+      maxDefaultMaxToolCalls,
+    );
+    await _prefsRepo.save(p);
+    prefs.refresh();
+    update();
+  }
+
   String? get lastWorkspacePath => prefs.value.lastWorkspacePath;
 }
