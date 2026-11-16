@@ -336,6 +336,30 @@ class AgentEngine {
           );
           continue taskLoop;
         }
+        // Fallback diff-only when the provider rejects a request
+        // that already contains a tool call (HTTP 400/422 — the
+        // gateway accepted the first tool call but chokes on the
+        // follow-up carrying the tool result, e.g. a strict
+        // validation of the tool-call exchange). The offending
+        // exchange is dropped from the history so the retry request
+        // is clean; the task continues with diff proposals instead
+        // of failing outright. Only once per run: a second rejection
+        // fails the task with the provider's error detail.
+        if (!diffOnlyFallback &&
+            _isToolHistoryRejectedError(error) &&
+            _hasToolHistory(transientMessages)) {
+          diffOnlyFallback = true;
+          activeTools = null;
+          _dropLastToolExchange(transientMessages);
+          transientMessages.add({
+            'role': 'user',
+            'content': _toolHistoryRejectedMessage(profile.name),
+          });
+          onStatus?.call(
+            '${profile.name} rejected the tool-call request — continuing with diff proposals instead.',
+          );
+          continue taskLoop;
+        }
         if (_isRetryable(error)) {
           task.status = TaskStatus.paused;
           task.touch();
@@ -434,7 +458,6 @@ class AgentEngine {
             transientMessages.add({
               'role': 'tool',
               'tool_call_id': call.id,
-              'name': call.name,
               'content': wrapToolResultForPrompt(
                 call.name,
                 jsonEncode({
@@ -470,7 +493,6 @@ class AgentEngine {
           transientMessages.add({
             'role': 'tool',
             'tool_call_id': call.id,
-            'name': call.name,
             'content': wrapToolResultForPrompt(
               call.name,
               jsonEncode({'ok': true, 'steps': task.totalTodoCount}),
@@ -483,7 +505,6 @@ class AgentEngine {
           transientMessages.add({
             'role': 'tool',
             'tool_call_id': call.id,
-            'name': call.name,
             'content': wrapToolResultForPrompt(
               call.name,
               jsonEncode({
@@ -536,7 +557,6 @@ class AgentEngine {
         transientMessages.add({
           'role': 'tool',
           'tool_call_id': call.id,
-          'name': call.name,
           'content': wrapToolResultForPrompt(
             call.name,
             summarizeToolOutput(result.output),
@@ -751,6 +771,60 @@ class AgentEngine {
     ];
     return patterns.any(message.contains);
   }
+
+  /// True when the provider rejected a request that already carried
+  /// a tool call — HTTP 400/422 validation, or an error naming the
+  /// tool-call id. Distinct from [isToolsUnsupportedError]: the
+  /// gateway did accept tool calls, it just rejects the follow-up.
+  static bool _isToolHistoryRejectedError(LlmServiceException error) {
+    final message = error.message.toLowerCase();
+    return message.contains('http 400') ||
+        message.contains('http 422') ||
+        message.contains('tool_call_id');
+  }
+
+  /// True when the running history already contains an assistant
+  /// message with tool calls (i.e. there is a tool exchange that a
+  /// rejection can be blamed on and dropped).
+  static bool _hasToolHistory(List<Map<String, dynamic>> messages) {
+    for (final message in messages) {
+      if (message['role'] == 'assistant' &&
+          message['tool_calls'] is List &&
+          (message['tool_calls'] as List).isNotEmpty) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Removes the last assistant tool-call message and everything
+  /// after it (its tool results and any retry notes) from the
+  /// running history, so a retried request no longer carries the
+  /// exchange the provider rejected.
+  static void _dropLastToolExchange(List<Map<String, dynamic>> messages) {
+    var dropFrom = -1;
+    for (var i = messages.length - 1; i >= 0; i--) {
+      final message = messages[i];
+      if (message['role'] == 'assistant' &&
+          message['tool_calls'] is List &&
+          (message['tool_calls'] as List).isNotEmpty) {
+        dropFrom = i;
+        break;
+      }
+    }
+    if (dropFrom >= 0) messages.removeRange(dropFrom, messages.length);
+  }
+
+  static String _toolHistoryRejectedMessage(String gatewayName) =>
+      '[The provider ($gatewayName) rejected the request containing '
+      'the last tool call, so that tool exchange was dropped from '
+      'the conversation. Continue WITHOUT calling any tool: work out '
+      'the change by reasoning about the files already in context, '
+      'then answer with a short explanation followed by exactly one '
+      'fenced unified diff using `--- a/relative/path`, '
+      '`+++ b/relative/path`, and valid `@@` hunks. Do not claim to '
+      'have called any tool or run any command. The user will review '
+      'and apply the diff manually.]';
 
   static String _diffOnlyFallbackMessage(String gatewayName) =>
       '[Gateway limitation: $gatewayName does not support tool calling, '

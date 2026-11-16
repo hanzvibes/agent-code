@@ -185,6 +185,92 @@ void main() {
     expect(callCount, 1); // exactly one request, no retry
   });
 
+  test('assigns a fallback id when the provider streams a tool call without one', () async {
+    final sseBody = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"type":"function","function":{"name":"detect_project","arguments":""}}]}}]}',
+      '',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\": \\".\\"}"}}]}}]}',
+      '',
+      'data: [DONE]',
+    ].join('\n');
+
+    final mockClient = MockClient((request) async {
+      return http.Response(
+        sseBody,
+        200,
+        headers: {'content-type': 'text/event-stream'},
+      );
+    });
+
+    final service = LlmService(clientFactory: () => mockClient);
+    final response = await service.streamRequest(
+      profile: profile,
+      apiKey: 'test-key',
+      messages: [
+        {'role': 'user', 'content': 'Audit the environment'},
+      ],
+    );
+
+    expect(response.hasToolCalls, isTrue);
+    expect(response.toolCalls.length, 1);
+    // No chunk carried an id: the follow-up request must still
+    // carry a non-empty tool_call_id, or the provider rejects it
+    // with HTTP 400.
+    expect(response.toolCalls[0].id, 'call_0');
+    expect(response.toolCalls[0].name, 'detect_project');
+    expect(response.toolCalls[0].arguments, '{"path": "."}');
+  });
+
+  test('includes the provider detail when a 400 body is plain text', () async {
+    final mockClient = MockClient((request) async {
+      return http.Response('Bad request: tool_call_id is empty', 400);
+    });
+
+    final service = LlmService(clientFactory: () => mockClient);
+
+    await expectLater(
+      () => service.streamRequest(
+        profile: profile,
+        apiKey: null,
+        messages: [
+          {'role': 'user', 'content': 'Test'},
+        ],
+      ),
+      throwsA(
+        isA<LlmServiceException>().having(
+          (e) => e.message,
+          'message',
+          contains('tool_call_id is empty'),
+        ),
+      ),
+    );
+  });
+
+  test('still reports the status when a 400 body is empty', () async {
+    final mockClient = MockClient((request) async {
+      return http.Response('', 400);
+    });
+
+    final service = LlmService(clientFactory: () => mockClient);
+
+    await expectLater(
+      () => service.streamRequest(
+        profile: profile,
+        apiKey: null,
+        messages: [
+          {'role': 'user', 'content': 'Test'},
+        ],
+      ),
+      throwsA(
+        isA<LlmServiceException>().having(
+          (e) => e.message,
+          'message',
+          contains('HTTP 400'),
+        ),
+      ),
+    );
+  });
+
   test('supports cancellation via CancelToken', () async {
     final cancelToken = CancelToken();
     cancelToken.cancel();
