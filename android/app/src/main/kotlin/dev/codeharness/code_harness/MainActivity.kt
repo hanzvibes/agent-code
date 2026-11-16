@@ -196,6 +196,34 @@ class MainActivity : FlutterActivity() {
                     TermuxBridgeEvents.setSink(null)
                 }
             })
+        // Agent foreground service (Batch 5 — desain D8): keeps the
+        // agent loop alive while the app is in the background, with a
+        // persistent notification naming the task.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "dev.codeharness/agent_foreground")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "start" -> {
+                        val title = (call.arguments as? Map<*, *>)?.get("title") as? String
+                        val intent = Intent(this, AgentForegroundService::class.java)
+                            .putExtra(AgentForegroundService.EXTRA_TITLE, title)
+                        try {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                            result.success(null)
+                        } catch (error: Exception) {
+                            result.error("foreground_start_failed", error.message, null)
+                        }
+                    }
+                    "stop" -> {
+                        stopService(Intent(this, AgentForegroundService::class.java))
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
     }
 
     private fun isTermuxInstalled(): Boolean = try {

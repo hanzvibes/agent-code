@@ -22,6 +22,7 @@ import '../../widgets/markdown_message_view.dart';
 import '../review/change_history_view.dart';
 import '../review/review_view.dart';
 import '../settings/provider_form_view.dart';
+import 'activity_timeline.dart';
 import 'task_panel.dart';
 
 class AssistantView extends StatefulWidget {
@@ -127,6 +128,8 @@ class _AssistantViewState extends State<AssistantView> {
                 onViewChanges: () => _openChangeHistory(context, ctrl),
                 mode: ctrl.agentMode.value,
                 onModeChanged: (mode) => ctrl.setAgentMode(mode),
+                toolCalls: ctrl.toolCallRecords,
+                onResume: ctrl.resumeTask,
               ),
             Expanded(
               child: ctrl.isRestoringSession.value
@@ -182,14 +185,12 @@ class _AssistantViewState extends State<AssistantView> {
                       },
                     ),
             ),
-            if (ctrl.runtimeOutput.value.isNotEmpty)
-              _RuntimeOutputCard(
-                output: ctrl.runtimeOutput.value,
-                isRunning:
-                    ctrl.isLoading.value &&
-                    ctrl.statusMessage.value.startsWith('Termux'),
-                t: t,
-              ),
+            // Activity timeline (Batch 5 — desain D9): one card per
+            // tool call, replacing the single runtime-output card.
+            ActivityTimeline(
+              records: ctrl.toolCallRecords,
+              isRunning: ctrl.isLoading.value,
+            ),
             if (ctrl.statusMessage.value.isNotEmpty)
               _StatusBanner(
                 status: ctrl.statusMessage.value,
@@ -1005,94 +1006,6 @@ class _StreamingBubble extends StatelessWidget {
                 border: Border.all(color: t.hairline),
               ),
               child: MarkdownMessageView(content: text, t: t),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RuntimeOutputCard extends StatelessWidget {
-  final String output;
-  final bool isRunning;
-  final AppTokens t;
-
-  const _RuntimeOutputCard({
-    required this.output,
-    required this.isRunning,
-    required this.t,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final preview = output.length > 1800
-        ? output.substring(output.length - 1800)
-        : output;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: t.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: t.hairline),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(Icons.terminal_rounded, size: 16, color: t.accent),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  'Termux command output',
-                  style: t.small.copyWith(fontWeight: FontWeight.w600),
-                ),
-              ),
-              if (isRunning) ...[
-                const SizedBox(
-                  width: 12,
-                  height: 12,
-                  child: CircularProgressIndicator(strokeWidth: 1.7),
-                ),
-                const SizedBox(width: 6),
-                Text('Live', style: t.small.copyWith(color: t.accent)),
-              ] else
-                Text('Latest run', style: t.small.copyWith(color: t.muted)),
-            ],
-          ),
-          const SizedBox(height: 6),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 76),
-            child: SingleChildScrollView(
-              reverse: true,
-              child: SelectableText(
-                preview,
-                style: t.small.copyWith(fontFamily: 'monospace', color: t.text),
-              ),
-            ),
-          ),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton(
-              onPressed: () => showModalBottomSheet<void>(
-                context: context,
-                isScrollControlled: true,
-                useSafeArea: true,
-                builder: (_) => SafeArea(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: SingleChildScrollView(
-                      child: SelectableText(
-                        output,
-                        style: t.small.copyWith(fontFamily: 'monospace'),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              child: const Text('View output'),
             ),
           ),
         ],

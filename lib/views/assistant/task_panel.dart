@@ -2,14 +2,21 @@ import 'package:flutter/material.dart';
 
 import '../../core/ui.dart';
 import '../../models/agent_task.dart';
+import '../../models/tool_call_record.dart';
 
-/// Active-task card shown above the message list (Batch 1, desain D9).
+/// Active-task card shown above the message list (Batch 1, desain D9;
+/// Batch 5: todo checklist + resume).
 ///
 /// Follows the visual pattern of `_RuntimeOutputCard` / `_StatusBanner`:
 /// surface card, hairline border, small text. Shows the task title,
 /// current mode, todo progress (x/y) and the budget used; the Stop
 /// button cancels the running loop (not just the UI).
-class TaskPanel extends StatelessWidget {
+///
+/// Batch 5: each todo step is a checklist row that expands to show
+/// the tool calls made for that step, and a paused task shows a
+/// Lanjutkan button that continues the loop from the round it
+/// stopped at instead of restarting.
+class TaskPanel extends StatefulWidget {
   final AgentTask task;
   final bool isRunning;
   final VoidCallback onStop;
@@ -28,6 +35,14 @@ class TaskPanel extends StatelessWidget {
   /// shown as a tag only (no switcher).
   final ValueChanged<AgentMode>? onModeChanged;
 
+  /// Tool-call records of this task (Batch 5). Each todo step expands
+  /// to show the records linked to it.
+  final List<ToolCallRecord> toolCalls;
+
+  /// Called when the user presses Lanjutkan on a paused task
+  /// (Batch 5). When null, no resume button is shown.
+  final VoidCallback? onResume;
+
   const TaskPanel({
     super.key,
     required this.task,
@@ -37,6 +52,8 @@ class TaskPanel extends StatelessWidget {
     this.onViewChanges,
     this.mode,
     this.onModeChanged,
+    this.toolCalls = const [],
+    this.onResume,
   });
 
   static String statusLabel(TaskStatus status) => switch (status) {
@@ -58,13 +75,29 @@ class TaskPanel extends StatelessWidget {
       'Auto — semua jalan otomatis kecuali daftar larang. Hanya untuk workspace tepercaya.',
   };
 
+  /// True when the task stopped in a state Lanjutkan can continue
+  /// from (Batch 5 — desain D8).
+  static bool canResume(TaskStatus status) =>
+      status == TaskStatus.paused ||
+      status == TaskStatus.needsHelp ||
+      status == TaskStatus.cancelled;
+
+  @override
+  State<TaskPanel> createState() => _TaskPanelState();
+}
+
+class _TaskPanelState extends State<TaskPanel> {
+  /// Todo step currently expanded to show its tool calls, if any.
+  String? _expandedStepId;
+
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
+    final task = widget.task;
     final done = task.doneTodoCount;
     final total = task.totalTodoCount;
     final progress = total == 0 ? 0.0 : done / total;
-    final effectiveMode = mode ?? task.mode;
+    final effectiveMode = widget.mode ?? task.mode;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -94,9 +127,9 @@ class TaskPanel extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              if (onModeChanged == null)
+              if (widget.onModeChanged == null)
                 AppTag(effectiveMode.label, color: t.accent),
-              if (isRunning) ...[
+              if (widget.isRunning) ...[
                 const SizedBox(width: 8),
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
@@ -108,12 +141,12 @@ class TaskPanel extends StatelessWidget {
                   ),
                   icon: const Icon(Icons.stop_rounded, size: 16),
                   label: const Text('Stop'),
-                  onPressed: onStop,
+                  onPressed: widget.onStop,
                 ),
               ],
             ],
           ),
-          if (onModeChanged != null) ...[
+          if (widget.onModeChanged != null) ...[
             const SizedBox(height: 10),
             SegmentedButton<AgentMode>(
               segments: const [
@@ -123,7 +156,7 @@ class TaskPanel extends StatelessWidget {
               ],
               selected: {effectiveMode},
               onSelectionChanged: (selection) =>
-                  onModeChanged!(selection.single),
+                  widget.onModeChanged!(selection.single),
               showSelectedIcon: false,
               style: ButtonStyle(
                 visualDensity: VisualDensity.compact,
@@ -132,7 +165,7 @@ class TaskPanel extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              modeHint(effectiveMode),
+              TaskPanel.modeHint(effectiveMode),
               style: t.small.copyWith(color: t.muted),
             ),
           ],
@@ -156,6 +189,19 @@ class TaskPanel extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 6),
+            // Todo checklist (Batch 5 — desain D9): each step expands
+            // to show the tool calls linked to it.
+            for (final step in task.todos)
+              _TodoRow(
+                step: step,
+                calls: _callsForStep(step),
+                expanded: _expandedStepId == step.id,
+                onTap: () => setState(() {
+                  _expandedStepId = _expandedStepId == step.id ? null : step.id;
+                }),
+                t: t,
+              ),
+            const SizedBox(height: 2),
           ],
           Row(
             children: [
@@ -176,7 +222,7 @@ class TaskPanel extends StatelessWidget {
                 ),
             ],
           ),
-          if (changeCount > 0) ...[
+          if (widget.changeCount > 0) ...[
             const SizedBox(height: 8),
             Align(
               alignment: Alignment.centerLeft,
@@ -188,28 +234,175 @@ class TaskPanel extends StatelessWidget {
                 ),
                 icon: const Icon(Icons.history_rounded, size: 16),
                 label: Text(
-                  changeCount == 1 ? '1 change' : '$changeCount changes',
+                  widget.changeCount == 1
+                      ? '1 change'
+                      : '${widget.changeCount} changes',
                 ),
-                onPressed: onViewChanges,
+                onPressed: widget.onViewChanges,
               ),
             ),
           ],
-          if (!isRunning) ...[
-            const SizedBox(height: 4),
-            Text(
-              statusLabel(task.status),
-              style: t.small.copyWith(
-                color: task.status == TaskStatus.done
-                    ? t.green
-                    : task.status == TaskStatus.needsHelp ||
-                          task.status == TaskStatus.failed
-                    ? t.red
-                    : t.muted,
-                fontWeight: FontWeight.w600,
-              ),
+          if (!widget.isRunning) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    TaskPanel.statusLabel(task.status),
+                    style: t.small.copyWith(
+                      color: task.status == TaskStatus.done
+                          ? t.green
+                          : task.status == TaskStatus.needsHelp ||
+                                task.status == TaskStatus.failed
+                          ? t.red
+                          : t.muted,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (TaskPanel.canResume(task.status) && widget.onResume != null)
+                  FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(44, 36),
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                    label: const Text('Lanjutkan'),
+                    onPressed: widget.onResume,
+                  ),
+              ],
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  List<ToolCallRecord> _callsForStep(TaskStep step) {
+    final ids = step.toolCallIds.toSet();
+    return widget.toolCalls
+        .where((record) => ids.contains(record.id) || record.stepId == step.id)
+        .toList();
+  }
+}
+
+class _TodoRow extends StatelessWidget {
+  final TaskStep step;
+  final List<ToolCallRecord> calls;
+  final bool expanded;
+  final VoidCallback onTap;
+  final AppTokens t;
+
+  const _TodoRow({
+    required this.step,
+    required this.calls,
+    required this.expanded,
+    required this.onTap,
+    required this.t,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = switch (step.status) {
+      TaskStepStatus.done => t.green,
+      TaskStepStatus.active => t.accent,
+      TaskStepStatus.failed => t.red,
+      TaskStepStatus.skipped => t.muted,
+      TaskStepStatus.pending => t.muted,
+    };
+    final statusIcon = switch (step.status) {
+      TaskStepStatus.done => Icons.check_circle_rounded,
+      TaskStepStatus.active => Icons.radio_button_checked_rounded,
+      TaskStepStatus.failed => Icons.error_outline_rounded,
+      TaskStepStatus.skipped => Icons.skip_next_rounded,
+      TaskStepStatus.pending => Icons.radio_button_unchecked_rounded,
+    };
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(statusIcon, size: 16, color: statusColor),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    step.title,
+                    style: t.small.copyWith(
+                      color: step.status == TaskStepStatus.done
+                          ? t.muted
+                          : t.text,
+                      decoration: step.status == TaskStepStatus.done
+                          ? TextDecoration.lineThrough
+                          : null,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                if (calls.isNotEmpty) ...[
+                  Text(
+                    '${calls.length} call${calls.length == 1 ? '' : 's'}',
+                    style: t.small.copyWith(color: t.faint),
+                  ),
+                  const SizedBox(width: 2),
+                  Icon(
+                    expanded
+                        ? Icons.expand_less_rounded
+                        : Icons.expand_more_rounded,
+                    size: 16,
+                    color: t.muted,
+                  ),
+                ],
+              ],
+            ),
+            if (expanded && calls.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(left: 24, top: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final call in calls)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 2),
+                        child: Row(
+                          children: [
+                            Icon(
+                              call.status == ToolCallStatus.ok
+                                  ? Icons.check_circle_outline_rounded
+                                  : call.status == ToolCallStatus.running
+                                  ? Icons.autorenew_rounded
+                                  : Icons.error_outline_rounded,
+                              size: 13,
+                              color: call.status == ToolCallStatus.ok
+                                  ? t.green
+                                  : call.status == ToolCallStatus.running
+                                  ? t.accent
+                                  : t.red,
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                '${call.toolName} — ${call.status.label}',
+                                style: t.small.copyWith(
+                                  fontFamily: 'monospace',
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

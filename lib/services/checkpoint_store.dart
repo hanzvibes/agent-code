@@ -28,8 +28,8 @@ class UndoResult {
   });
 }
 
-/// In-memory store of agent file-change checkpoints (Batch 2 — desain
-/// §5, D2).
+/// Store of agent file-change checkpoints (Batch 2 — desain §5, D2;
+/// Batch 5 — desain D8: persisted through [TaskStore]).
 ///
 /// Every write tool records a [Checkpoint] (content before + after)
 /// before mutating a file, and deletes move the file to the trash
@@ -38,9 +38,10 @@ class UndoResult {
 /// if the user (or another tool) changed the file afterwards, undo
 /// refuses instead of silently overwriting their work (desain §6).
 ///
-/// The store is in-memory for Batch 2; persisting it to Hive (so a
-/// session can resume after the app is closed) is Batch 5's TaskStore
-/// work. Checkpoints are dropped when the workspace changes.
+/// The in-memory list is the working set; the controller persists it
+/// to Hive via [TaskStore] after every change and restores it with
+/// [loadAll] when a workspace (and its resumable task) is reopened,
+/// so checkpoints and undo survive the app being closed.
 class CheckpointStore {
   /// Trash folder inside the workspace (desain D2).
   static const String trashDirName = '.codeharness-trash';
@@ -51,6 +52,15 @@ class CheckpointStore {
 
   void record(Checkpoint checkpoint) {
     _checkpoints.add(checkpoint);
+  }
+
+  /// Replaces the working set with persisted checkpoints (Batch 5):
+  /// called when a workspace is reopened so undo still works for a
+  /// task that stopped earlier.
+  void loadAll(List<Checkpoint> checkpoints) {
+    _checkpoints
+      ..clear()
+      ..addAll(checkpoints);
   }
 
   /// Removes a checkpoint without undoing it (used when the write that
@@ -108,10 +118,7 @@ class CheckpointStore {
     String stepId,
     String workspaceRoot,
   ) async {
-    return undoCheckpoints(
-      checkpointsForStep(taskId, stepId),
-      workspaceRoot,
-    );
+    return undoCheckpoints(checkpointsForStep(taskId, stepId), workspaceRoot);
   }
 
   /// Undoes every checkpoint of a task, newest first.
@@ -169,19 +176,12 @@ class CheckpointStore {
         );
       }
     }
-    return UndoResult(
-      ok: true,
-      undoneCount: applied,
-      undonePaths: undonePaths,
-    );
+    return UndoResult(ok: true, undoneCount: applied, undonePaths: undonePaths);
   }
 
   /// Returns a refusal message, or null when this checkpoint can be
   /// undone (or is already in its before-state).
-  Future<String?> _validateUndo(
-    Checkpoint cp,
-    String workspaceRoot,
-  ) async {
+  Future<String?> _validateUndo(Checkpoint cp, String workspaceRoot) async {
     final absolutePath = await _safeAbsolutePath(workspaceRoot, cp.path);
     if (absolutePath == null) return '${cp.path}: unsafe path.';
     final file = File(absolutePath);

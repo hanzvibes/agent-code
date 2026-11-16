@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:code_harness/core/theme.dart';
 import 'package:code_harness/models/agent_task.dart';
+import 'package:code_harness/models/tool_call_record.dart';
 import 'package:code_harness/views/assistant/task_panel.dart';
 
 Future<void> _pumpPanel(
@@ -13,6 +14,8 @@ Future<void> _pumpPanel(
   VoidCallback? onViewChanges,
   AgentMode? mode,
   ValueChanged<AgentMode>? onModeChanged,
+  List<ToolCallRecord> toolCalls = const [],
+  VoidCallback? onResume,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -26,6 +29,8 @@ Future<void> _pumpPanel(
           onViewChanges: onViewChanges,
           mode: mode,
           onModeChanged: onModeChanged,
+          toolCalls: toolCalls,
+          onResume: onResume,
         ),
       ),
     ),
@@ -182,5 +187,86 @@ void main() {
 
     expect(find.text('Auto'), findsOneWidget);
     expect(find.text('Plan'), findsNothing);
+  });
+
+  testWidgets('paused task shows Lanjutkan and calls onResume', (tester) async {
+    var resumed = false;
+    final task = AgentTask(title: 'Paused task', status: TaskStatus.paused);
+
+    await _pumpPanel(
+      tester,
+      task,
+      isRunning: false,
+      onResume: () => resumed = true,
+    );
+
+    expect(find.text('Lanjutkan'), findsOneWidget);
+    await tester.tap(find.text('Lanjutkan'));
+    await tester.pump();
+    expect(resumed, isTrue);
+  });
+
+  testWidgets('running or finished tasks hide Lanjutkan', (tester) async {
+    final running = AgentTask(title: 'Running task');
+    await _pumpPanel(tester, running, isRunning: true, onResume: () {});
+    expect(find.text('Lanjutkan'), findsNothing);
+
+    final done = AgentTask(title: 'Done task', status: TaskStatus.done);
+    await _pumpPanel(tester, done, isRunning: false, onResume: () {});
+    expect(find.text('Lanjutkan'), findsNothing);
+  });
+
+  testWidgets('todo step expands to show its linked tool calls', (
+    tester,
+  ) async {
+    final step = TaskStep(
+      id: 's1',
+      title: 'Read the file',
+      status: TaskStepStatus.done,
+      toolCallIds: ['tc_1'],
+    );
+    final task = AgentTask(
+      title: 'Task with steps',
+      todos: [step],
+      status: TaskStatus.paused,
+    );
+    final calls = [
+      ToolCallRecord(
+        id: 'tc_1',
+        taskId: task.id,
+        stepId: 's1',
+        toolName: 'read_project_file',
+        arguments: {'path': 'lib/main.dart'},
+        resultSummary: 'Read 12 lines',
+        status: ToolCallStatus.ok,
+      ),
+    ];
+
+    await _pumpPanel(tester, task, isRunning: false, toolCalls: calls);
+
+    expect(find.text('Read the file'), findsOneWidget);
+    expect(find.text('1 call'), findsOneWidget);
+    expect(find.textContaining('read_project_file'), findsNothing);
+
+    await tester.tap(find.text('Read the file'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('read_project_file'), findsOneWidget);
+    expect(find.textContaining('Selesai'), findsOneWidget);
+  });
+
+  testWidgets('todo step without calls has no expand affordance', (
+    tester,
+  ) async {
+    final task = AgentTask(
+      title: 'Task with plain steps',
+      todos: [TaskStep(id: 's1', title: 'Plan only')],
+      status: TaskStatus.paused,
+    );
+
+    await _pumpPanel(tester, task, isRunning: false);
+
+    expect(find.text('Plan only'), findsOneWidget);
+    expect(find.textContaining('call'), findsNothing);
   });
 }

@@ -59,8 +59,7 @@ class Checkpoint {
     required this.kind,
     DateTime? at,
     this.undone = false,
-  }) : id =
-           id ?? 'cp_${DateTime.now().millisecondsSinceEpoch}_${_sequence++}',
+  }) : id = id ?? 'cp_${DateTime.now().millisecondsSinceEpoch}_${_sequence++}',
        at = at ?? DateTime.now();
 
   /// A delete moves the file away, so the "after" state is "no file".
@@ -68,4 +67,38 @@ class Checkpoint {
 
   /// A write whose file did not exist before.
   bool get isCreate => kind == CheckpointKind.write && before == null;
+
+  /// JSON form for [TaskStore] persistence (Batch 5 — desain D8).
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'taskId': taskId,
+    'stepId': stepId,
+    'path': path,
+    'before': before,
+    'after': after,
+    'trashPath': trashPath,
+    'kind': kind.name,
+    'atMs': at.millisecondsSinceEpoch,
+    'undone': undone,
+  };
+
+  factory Checkpoint.fromJson(Map<String, dynamic> json) {
+    return Checkpoint(
+      id: json['id'] as String?,
+      taskId: json['taskId'] as String? ?? '',
+      stepId: json['stepId'] as String? ?? 'unplanned',
+      path: json['path'] as String? ?? '',
+      before: json['before'] as String?,
+      after: json['after'] as String?,
+      trashPath: json['trashPath'] as String?,
+      kind: CheckpointKind.values.firstWhere(
+        (value) => value.name == json['kind'],
+        orElse: () => CheckpointKind.write,
+      ),
+      at: json['atMs'] is num
+          ? DateTime.fromMillisecondsSinceEpoch((json['atMs'] as num).toInt())
+          : null,
+      undone: json['undone'] as bool? ?? false,
+    );
+  }
 }
