@@ -18,6 +18,8 @@ import '../services/agents_instructions_service.dart';
 import '../services/assistant_context_builder.dart';
 import '../services/checkpoint_store.dart';
 import '../services/llm_service.dart';
+import '../services/project_verifier.dart';
+import '../services/runtime_service.dart';
 import '../services/tool_registry.dart';
 import '../services/workspace_service.dart';
 import '../services/workspace_tool_service.dart';
@@ -31,7 +33,12 @@ class AssistantController extends GetxController {
   final ProfileRepository _profileRepo;
   final LlmService _llmService;
   final ChatRepository _chatRepo;
-  final WorkspaceToolService _toolService;
+  late final WorkspaceToolService _toolService;
+
+  /// Single runtime for command execution (Batch 3 — desain D5):
+  /// shared by the tool service and the verify gate so both record
+  /// the same backend.
+  final RuntimeService _runtimeService;
 
   /// Change checkpoints of the active task (Batch 2 — desain D2).
   /// Owns the undo history for the task's write tools.
@@ -46,16 +53,21 @@ class AssistantController extends GetxController {
     ChatRepository? chatRepo,
     WorkspaceToolService? toolService,
     CheckpointStore? checkpointStore,
+    RuntimeService? runtimeService,
+    ProjectVerifier? verifier,
   }) : _appController = appController,
        _projectController = projectController,
        _profileRepo = profileRepo,
        _llmService = llmService,
        _chatRepo = chatRepo ?? ChatRepository(),
-       _toolService = toolService ?? WorkspaceToolService(),
+       _runtimeService = runtimeService ?? RuntimeService(),
        checkpointStore = checkpointStore ?? CheckpointStore() {
+    _toolService =
+        toolService ?? WorkspaceToolService(runtimeService: _runtimeService);
     _engine = AgentEngine(
       llmService: _llmService,
       executeTool: _executeToolForEngine,
+      verifier: verifier ?? ProjectVerifier(runtime: _runtimeService),
     );
   }
 
@@ -406,6 +418,7 @@ class AssistantController extends GetxController {
         cancelToken: request,
         temperature: sessionTemperature.value,
         maxTokens: sessionMaxTokens.value,
+        workspaceRoot: _projectController.workspacePath.value,
         onDelta: (delta) {
           streamingText.value += delta;
           statusMessage.value = 'Preparing the answer…';
