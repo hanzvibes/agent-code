@@ -2,7 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:code_harness/services/tool_registry.dart';
 
 void main() {
-  test('registry defines the read tools and the four write tools', () {
+  test('registry defines the read tools, the four write tools and the '
+      'two detection tools', () {
     final names = ToolRegistry.allToolNames;
     expect(
       names,
@@ -14,9 +15,11 @@ void main() {
         'edit_file',
         'create_file',
         'delete_file',
+        'detect_project',
+        'probe_toolchain',
       ]),
     );
-    expect(names.length, 7);
+    expect(names.length, 9);
     expect(ToolRegistry.isWriteTool('write_file'), isTrue);
     expect(ToolRegistry.isWriteTool('edit_file'), isTrue);
     expect(ToolRegistry.isWriteTool('create_file'), isTrue);

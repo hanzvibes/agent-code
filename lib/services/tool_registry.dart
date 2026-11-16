@@ -163,10 +163,52 @@ class ToolRegistry {
     },
   ];
 
-  /// All workspace tools (read + write) in one list for the prompt.
+  /// Detection tools (Batch 3 — desain D4). `detect_project` is pure
+  /// file-system work; `probe_toolchain` runs `<tool> --version` on
+  /// the runtime, so it needs the runtime opt-in like
+  /// `run_project_command`.
+  static const List<Map<String, dynamic>> detectionToolDefinitions = [
+    {
+      'type': 'function',
+      'function': {
+        'name': 'detect_project',
+        'description':
+            'Detects the kind of project in the open workspace from marker files at the root (pubspec.yaml = Flutter/Dart, package.json = Node, requirements.txt/pyproject.toml = Python, build.gradle = Gradle/Android, go.mod = Go, Cargo.toml = Rust, composer.json = PHP, none = generic). Returns the type and the marker files found. Call this first when starting work in an unfamiliar project.',
+        'parameters': {
+          'type': 'object',
+          'properties': {},
+          'additionalProperties': false,
+        },
+      },
+    },
+    {
+      'type': 'function',
+      'function': {
+        'name': 'probe_toolchain',
+        'description':
+            'Checks which tools are available on the runtime and their versions, by running "<tool> --version" for each. Without a "tools" argument it probes the tools relevant to the detected project kind plus git and rg. Returns one entry per tool: tool, available, version, backend (bundled or termux). Needs the runtime enabled.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'tools': {
+              'type': 'array',
+              'items': {'type': 'string'},
+              'description':
+                  'Optional tool names to probe (for example ["node", "npm"]). Defaults to the tools relevant to the project kind.',
+            },
+          },
+          'additionalProperties': false,
+        },
+      },
+    },
+  ];
+
+  /// All workspace tools (read + write + detection) in one list for
+  /// the prompt.
   static List<Map<String, dynamic>> get allToolDefinitions => [
     ...readToolDefinitions,
     ...writeToolDefinitions,
+    ...detectionToolDefinitions,
   ];
 
   static const Set<String> writeToolNames = {

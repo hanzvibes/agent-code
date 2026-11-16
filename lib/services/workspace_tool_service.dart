@@ -5,6 +5,8 @@ import 'package:path/path.dart' as p;
 import '../models/checkpoint.dart';
 import 'android_native_action_service.dart';
 import 'checkpoint_store.dart';
+import 'project_detector.dart';
+import 'runtime_service.dart';
 import 'search_service.dart';
 import 'termux_runtime_service.dart';
 import 'tool_registry.dart';
@@ -56,15 +58,23 @@ class ToolExecutionResult {
 
 class WorkspaceToolService {
   final SearchService _searchService;
-  final TermuxRuntimeAdapter _termuxRuntime;
+
+  /// Single entry point for all command execution (Batch 3 — desain
+  /// D5). A [TermuxRuntimeAdapter] passed in is wrapped in a
+  /// [TermuxRuntimeBackend] so existing callers keep working; pass a
+  /// [RuntimeService] directly to control both backends.
+  final RuntimeService _runtime;
   final AndroidNativeActionAdapter _androidActions;
 
   WorkspaceToolService({
     SearchService? searchService,
     TermuxRuntimeAdapter? termuxRuntime,
+    RuntimeService? runtimeService,
     AndroidNativeActionAdapter? androidActions,
   }) : _searchService = searchService ?? SearchService(),
-       _termuxRuntime = termuxRuntime ?? TermuxRuntimeService(),
+       _runtime =
+           runtimeService ??
+           RuntimeService(termux: TermuxRuntimeBackend(termuxRuntime)),
        _androidActions = androidActions ?? AndroidNativeActionService();
 
   /// Read-only workspace tools. The full set (read + write) lives in
@@ -78,7 +88,7 @@ class WorkspaceToolService {
       'function': {
         'name': 'run_project_command',
         'description':
-            'Runs one shell command through the user-enabled Termux environment in the open project or a project-relative subfolder. For a concrete user request to install, build, test, or run something, execute the task instead of giving a tutorial: inspect the environment, install only missing task-relevant prerequisites through Termux pkg, install requested project dependencies with the existing package manager, then run and verify the task. Routine installs explicitly requested by the user do not need another confirmation. Use only relevant prerequisites (for example, Node.js/npm for Remotion; Python only when needed). Commands can change files and access Termux-visible device files/network. Ask before destructive/high-impact actions or sending private data off-device. Return actual output and exit status; do not claim work that was not run. Commands are bounded to 1–120 seconds, 32 KB, and 16 KB output per stream.',
+            'Runs one shell command through the runtime in the open project or a project-relative subfolder (Termux backend for now; bundled tools later — the runtime picks the backend and records it in the result). For a concrete user request to install, build, test, or run something, execute the task instead of giving a tutorial: inspect the environment, install only missing task-relevant prerequisites through Termux pkg, install requested project dependencies with the existing package manager, then run and verify the task. Routine installs explicitly requested by the user do not need another confirmation. Use only relevant prerequisites (for example, Node.js/npm for Remotion; Python only when needed). Commands can change files and access Termux-visible device files/network. Ask before destructive/high-impact actions or sending private data off-device. Return actual output and exit status; do not claim work that was not run. Commands are bounded to 1–120 seconds, 32 KB, and 16 KB output per stream.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -228,6 +238,17 @@ class WorkspaceToolService {
           taskId: taskId,
           stepId: stepId,
         );
+      case 'detect_project':
+        return _executeDetectProject(workspaceRoot, callId);
+      case 'probe_toolchain':
+        if (!allowTermuxExecution) {
+          return _toolError(
+            call,
+            'Toolchain probing needs the runtime enabled for this session.',
+            'Blocked toolchain probe (not enabled)',
+          );
+        }
+        return _executeProbeToolchain(workspaceRoot, call);
       case 'run_project_command':
         if (!allowTermuxExecution) {
           return _toolError(
@@ -261,7 +282,9 @@ class WorkspaceToolService {
             'error':
                 'Tool "$name" is not permitted. Available workspace tools: '
                 'list_project_files, read_project_file, search_project, '
-                'write_file, edit_file, create_file, delete_file.',
+                'write_file, edit_file, create_file, delete_file, '
+                'detect_project, probe_toolchain, run_project_command, '
+                'android_action.',
           }),
           summary: 'Blocked unauthorized tool "$name"',
           isError: true,
@@ -270,7 +293,7 @@ class WorkspaceToolService {
   }
 
   void cancelActiveCommand() {
-    _termuxRuntime.cancelActiveCommand();
+    _runtime.cancelActiveCommand();
   }
 
   ToolExecutionResult _toolError(
@@ -366,7 +389,7 @@ class WorkspaceToolService {
             TermuxRuntimeService.maxTimeoutSeconds,
           )
           .toInt();
-      final result = await _termuxRuntime.execute(
+      final result = await _runtime.run(
         command: command,
         workspaceRoot: root,
         workingDirectory: canonicalCwd,
@@ -376,10 +399,10 @@ class WorkspaceToolService {
       return ToolExecutionResult(
         callId: call.id,
         toolName: call.name,
-        output: TermuxRuntimeService.formatOutputForTool(result),
+        output: jsonEncode(result.toJson()),
         summary: result.error == null
-            ? 'Termux command finished (exit ${result.exitCode})'
-            : 'Termux command error: ${result.error}',
+            ? 'Command finished (exit ${result.exitCode}) via ${result.backend}'
+            : 'Command error via ${result.backend}: ${result.error}',
       );
     } catch (error) {
       return _toolError(
@@ -388,6 +411,58 @@ class WorkspaceToolService {
         'Termux command failed',
       );
     }
+  }
+
+  /// Detects the project kind from root marker files (Batch 3 —
+  /// desain D4). Pure file-system work, no runtime needed.
+  Future<ToolExecutionResult> _executeDetectProject(
+    String workspaceRoot,
+    String callId,
+  ) async {
+    final info = await ProjectDetector.detect(workspaceRoot);
+    return ToolExecutionResult(
+      callId: callId,
+      toolName: 'detect_project',
+      output: jsonEncode(info.toJson()),
+      summary: 'Detected ${info.type.label} project',
+    );
+  }
+
+  /// Probes the toolchain on the runtime (Batch 3 — desain D4):
+  /// `<tool> --version` for the tools relevant to the detected
+  /// project kind (or the tools the model named), via [RuntimeService].
+  Future<ToolExecutionResult> _executeProbeToolchain(
+    String workspaceRoot,
+    ToolCallInfo call,
+  ) async {
+    final args = _decodeArgs(call);
+    List<String>? requested;
+    if (args != null && args['tools'] is List) {
+      requested = (args['tools'] as List)
+          .whereType<String>()
+          .map((tool) => tool.trim())
+          .where((tool) => tool.isNotEmpty)
+          .toList();
+    }
+    final info = await ProjectDetector.detect(workspaceRoot);
+    final tools = requested == null || requested.isEmpty
+        ? ProjectDetector.defaultProbeTools(info.type)
+        : requested;
+    final probes = await _runtime.probeTools(
+      tools,
+      workspaceRoot: workspaceRoot,
+    );
+    final availableCount = probes.where((probe) => probe.available).length;
+    return ToolExecutionResult(
+      callId: call.id,
+      toolName: call.name,
+      output: jsonEncode({
+        'project_type': info.type.id,
+        'tools': probes.map((probe) => probe.toJson()).toList(),
+      }),
+      summary:
+          'Probed ${probes.length} tools ($availableCount available) for ${info.type.label}',
+    );
   }
 
   Future<ToolExecutionResult> _executeAndroidAction(
