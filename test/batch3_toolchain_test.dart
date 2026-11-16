@@ -215,7 +215,7 @@ void main() {
       }
     });
 
-    test('python runs pytest when tests exist and py_compile on changed files',
+    test('python runs python3 -m pytest when tests exist and py_compile on changed files',
         () async {
       final dir = await _tempProject({
         'requirements.txt': 'pytest\n',
@@ -229,7 +229,7 @@ void main() {
             ProjectType.python,
             changedFiles: ['main.py', 'README.md'],
           ),
-          ['pytest', 'python -m py_compile main.py'],
+          ['python3 -m pytest', 'python3 -m py_compile main.py'],
         );
         // No changed .py files: only pytest.
         expect(
@@ -238,25 +238,31 @@ void main() {
             ProjectType.python,
             changedFiles: ['README.md'],
           ),
-          ['pytest'],
+          ['python3 -m pytest'],
         );
       } finally {
         await dir.delete(recursive: true);
       }
     });
 
-    test('go, rust and php return their standard commands', () async {
-      final dir = await _tempProject({});
+    test('go, rust and php have no verify commands (tools not bundled)',
+        () async {
+      final dir = await _tempProject({
+        'composer.json': jsonEncode({
+          'scripts': {'test': 'phpunit'},
+        }),
+      });
       try {
+        // `go`, `cargo`, `composer` and `php` are not in the bundled
+        // runtime, so verification is skipped instead of failing.
         expect(
           await ProjectDetector.verifyCommands(dir.path, ProjectType.go),
-          ['go test ./...'],
+          isEmpty,
         );
         expect(
           await ProjectDetector.verifyCommands(dir.path, ProjectType.rust),
-          ['cargo test'],
+          isEmpty,
         );
-        // PHP without a test script and no changed .php files: none.
         expect(
           await ProjectDetector.verifyCommands(dir.path, ProjectType.php),
           isEmpty,
@@ -267,27 +273,7 @@ void main() {
             ProjectType.php,
             changedFiles: ['src/Api.php'],
           ),
-          ['php -l src/Api.php'],
-        );
-      } finally {
-        await dir.delete(recursive: true);
-      }
-    });
-
-    test('php prefers composer test when the script exists', () async {
-      final dir = await _tempProject({
-        'composer.json': jsonEncode({
-          'scripts': {'test': 'phpunit'},
-        }),
-      });
-      try {
-        expect(
-          await ProjectDetector.verifyCommands(
-            dir.path,
-            ProjectType.php,
-            changedFiles: ['src/Api.php'],
-          ),
-          ['composer test'],
+          isEmpty,
         );
       } finally {
         await dir.delete(recursive: true);
@@ -578,37 +564,54 @@ void main() {
     });
 
     test('passes when all commands pass', () async {
-      final runtime = RuntimeService(
-        bundled: FakeBackend(
-          name: 'bundled',
-          tools: {'go': 'go version go1.22.0\n'},
-          runResults: {
-            'go test ./...': const CommandResult(
-              stdout: 'ok\n',
-              exitCode: 0,
-              backend: 'bundled',
-            ),
-          },
-        ),
-      );
-      final verifier = ProjectVerifier(runtime: runtime);
-      final outcome = await verifier.verify(
-        workspaceRoot: '/tmp',
-        projectType: ProjectType.go,
-        changedFiles: ['main.go'],
-      );
-      expect(outcome.passed, isTrue);
-      expect(outcome.skipped, isFalse);
-      expect(outcome.attempts, hasLength(1));
+      final dir = await _tempProject({
+        'package.json': jsonEncode({
+          'scripts': {'test': 'jest'},
+        }),
+      });
+      try {
+        final runtime = RuntimeService(
+          bundled: FakeBackend(
+            name: 'bundled',
+            tools: {'npm': 'npm 12.2.2\n'},
+            runResults: {
+              'npm test': const CommandResult(
+                stdout: 'PASS\n',
+                exitCode: 0,
+                backend: 'bundled',
+              ),
+            },
+          ),
+        );
+        final verifier = ProjectVerifier(runtime: runtime);
+        final outcome = await verifier.verify(
+          workspaceRoot: dir.path,
+          projectType: ProjectType.node,
+          changedFiles: ['src/a.js'],
+        );
+        expect(outcome.passed, isTrue);
+        expect(outcome.skipped, isFalse);
+        expect(outcome.attempts, hasLength(1));
+      } finally {
+        await dir.delete(recursive: true);
+      }
     });
 
-    test('skips without running anything for flutter and generic',
+    test('skips without running anything for flutter, generic, go, rust and php',
         () async {
       final bundled = FakeBackend(name: 'bundled');
       final verifier = ProjectVerifier(
         runtime: RuntimeService(bundled: bundled),
       );
-      for (final type in [ProjectType.flutter, ProjectType.generic]) {
+      // Go, Rust and PHP have no bundled verify tools, so they skip
+      // like Flutter/generic.
+      for (final type in [
+        ProjectType.flutter,
+        ProjectType.generic,
+        ProjectType.go,
+        ProjectType.rust,
+        ProjectType.php,
+      ]) {
         final outcome = await verifier.verify(
           workspaceRoot: '/tmp',
           projectType: type,
@@ -806,9 +809,9 @@ void main() {
       runtime: RuntimeService(
         bundled: FakeBackend(
           name: 'bundled',
-          tools: {'pytest': 'pytest 8.0.0\n'},
+          tools: {'python3': 'Python 3.14\n'},
           runResults: {
-            'pytest': const CommandResult(
+            'python3 -m pytest': const CommandResult(
               stdout: 'FAILED test_main.py::test_x\nAssertionError\n',
               exitCode: 1,
               backend: 'bundled',
@@ -828,14 +831,14 @@ void main() {
           runtime: RuntimeService(
             bundled: FakeBackend(
               name: 'bundled',
-              tools: {'pytest': 'pytest 8.0.0\n', 'python': 'Python 3.14\n'},
+              tools: {'python3': 'Python 3.14\n'},
               runResults: {
-                'pytest': const CommandResult(
+                'python3 -m pytest': const CommandResult(
                   stdout: '1 passed\n',
                   exitCode: 0,
                   backend: 'bundled',
                 ),
-                'python -m py_compile main.py': const CommandResult(
+                'python3 -m py_compile main.py': const CommandResult(
                   stdout: '',
                   exitCode: 0,
                   backend: 'bundled',
