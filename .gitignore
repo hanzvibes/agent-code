@@ -53,3 +53,9 @@ app.*.map.json
 .env.*
 *.apk
 *.aab
+
+# Tier 2: libnode.so is reassembled at build time from committed
+# libnode.so.chunk00..04 (GitHub Git Data API rejects the ~48 MB blob),
+# so the reassembled file must never be committed. The chunks are NOT
+# ignored and must be pushed.
+android/app/src/main/jniLibs/*/libnode.so

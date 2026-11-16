@@ -494,7 +494,16 @@ check_elf() { # $1=file
 }
 total=0
 for lib in "$JNI_OUT"/lib*.so; do check_elf "$lib"; size="$(wc -c < "$lib")"; total=$((total + size)); echo "$ABI staged: $(basename "$lib") ($size B)"; done
-echo "$ABI tier2 closure: $total B (131 files incl. 7 git-core helpers; raw, before APK compression)"
+echo "$ABI tier2 closure: $total B (131 .so files incl. 7 git-core helpers; libnode.so split into 5 chunks below; raw, before APK compression)"
+
+# GitHub Git Data API menolak blob ~48 MB (HTTP 422): libnode.so disimpan
+# sebagai chunk ~10 MB, dirakit ulang task Gradle reassembleLibnode saat
+# build. Urutan penting: split HANYA setelah patchelf + ELF gates lolos
+# (gate di atas memeriksa .so utuh).
+split -b 10485760 -d --suffix-length=2 \
+  "$JNI_OUT/libnode.so" "$JNI_OUT/libnode.so.chunk"
+rm -f "$JNI_OUT/libnode.so"
+echo "$ABI libnode.so split: 5 chunks (reassembled by Gradle reassembleLibnode at build)"
 
 # --- Assets: npm tree + corepack + CA bundle; python stdlib + pip ------------
 if [ "$WITH_ASSETS" = "1" ]; then
