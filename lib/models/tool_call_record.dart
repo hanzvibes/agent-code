@@ -53,7 +53,7 @@ class ToolCallRecord {
   /// Full result, only in the store (capped when persisted).
   String? resultFull;
 
-  /// Backend that ran the call (`bundled` / `termux` / `none`). Tools
+  /// Backend that ran the call (`bundled` / `none`). Tools
   /// that run inside the app report `bundled`.
   String backend;
 

@@ -343,10 +343,15 @@ void main() {
     );
     final systemPrompt = systemMessage['content'] as String;
     expect(systemPrompt, contains('do not substitute a tutorial'));
-    expect(systemPrompt, contains('Node.js for Remotion/npm tasks'));
+    // Bundled-only runtime: the prompt must never promise a runtime
+    // install (there is no package manager); it names the bundled
+    // tools and tells the model to say so when one is missing.
+    expect(systemPrompt, contains('no way to install a missing runtime tool'));
+    expect(systemPrompt, contains('never promise to install one'));
+    expect(systemPrompt, isNot(contains('Node.js for Remotion/npm tasks')));
     expect(
       systemPrompt,
-      contains('routine toolchain and project-package installation'),
+      contains('routine project-package installation'),
     );
     expect(systemPrompt, contains('bounded to 120 seconds'));
   });

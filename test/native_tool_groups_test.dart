@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'package:code_harness/models/agent_task.dart';
 import 'package:code_harness/services/android_native_action_service.dart';
-import 'package:code_harness/services/termux_runtime_service.dart';
+import 'package:code_harness/services/runtime_service.dart';
 import 'package:code_harness/services/workspace_tool_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -24,33 +24,37 @@ class _FakeAndroidActions implements AndroidNativeActionAdapter {
   }
 }
 
-class _FakeTermux implements TermuxRuntimeAdapter {
+/// Bundled-backend fake: answers `hasTool` from a tool table and
+/// returns a scripted result for every run.
+class _FakeBundledBackend implements RuntimeBackend {
   int calls = 0;
 
   @override
-  Future<TermuxRuntimeStatus> getStatus() async =>
-      const TermuxRuntimeStatus(installed: true, permissionGranted: true);
+  String get name => 'bundled';
 
   @override
-  Future<void> openAppPermissionSettings() async {}
+  Future<bool> hasTool(
+    String name, {
+    String workspaceRoot = '',
+    String cwd = '',
+  }) async => name == 'git';
 
   @override
-  Future<void> openTermux() async {}
-
-  @override
-  Future<TermuxCommandResult> execute({
+  Future<CommandResult> run({
     required String command,
     required String workspaceRoot,
-    required String workingDirectory,
-    required int timeoutSeconds,
+    required String cwd,
+    int timeoutSeconds = 30,
+    Map<String, String>? env,
     void Function(String channel, String chunk)? onOutput,
   }) async {
     calls++;
     onOutput?.call('stdout', 'ok\n');
-    return const TermuxCommandResult(
+    return const CommandResult(
       stdout: 'ok\n',
       stderr: 'warning\n',
       exitCode: 7,
+      backend: 'bundled',
     );
   }
 
@@ -61,10 +65,10 @@ class _FakeTermux implements TermuxRuntimeAdapter {
 void main() {
   group('bounded tool discovery', () {
     test('exposes one tool for each optional runtime/action group', () {
-      expect(WorkspaceToolService.termuxToolDefinitions, hasLength(1));
+      expect(WorkspaceToolService.runtimeToolDefinitions, hasLength(1));
       expect(WorkspaceToolService.androidActionToolDefinitions, hasLength(1));
       expect(
-        WorkspaceToolService.termuxToolDefinitions.single['function']['name'],
+        WorkspaceToolService.runtimeToolDefinitions.single['function']['name'],
         'run_project_command',
       );
       expect(
@@ -74,51 +78,42 @@ void main() {
         'android_action',
       );
     });
-
-    test('accepts only shared-storage workspace paths for Termux', () {
-      expect(
-        isTermuxSharedStoragePath('/storage/emulated/0/dev/project'),
-        isTrue,
-      );
-      expect(isTermuxSharedStoragePath('/sdcard/dev/project'), isTrue);
-      expect(
-        isTermuxSharedStoragePath('/data/user/0/app/files/project'),
-        isFalse,
-      );
-    });
   });
 
-  group('Termux command tool', () {
+  group('Runtime command tool', () {
     late Directory tempDir;
-    late _FakeTermux termux;
+    late _FakeBundledBackend bundled;
     late WorkspaceToolService service;
 
     setUp(() async {
-      tempDir = await Directory.systemTemp.createTemp('termux_tool_test_');
-      termux = _FakeTermux();
-      service = WorkspaceToolService(termuxRuntime: termux);
+      tempDir = await Directory.systemTemp.createTemp('runtime_tool_test_');
+      bundled = _FakeBundledBackend();
+      service = WorkspaceToolService(
+        runtimeService: RuntimeService(bundled: bundled),
+      );
     });
 
     tearDown(() async {
       if (tempDir.existsSync()) await tempDir.delete(recursive: true);
     });
 
-    test('Plan mode denies commands before contacting Termux', () async {
+    test('Plan mode denies commands before contacting the runtime', () async {
       final result = await service.execute(
         workspaceRoot: tempDir.path,
         mode: AgentMode.plan,
         call: const ToolCallInfo(
-          id: 'termux-plan',
+          id: 'runtime-plan',
           name: 'run_project_command',
-          arguments: '{"command":"python --version"}',
+          arguments: '{"command":"git status"}',
         ),
       );
 
       expect(result.output, contains('Plan mode is read-only'));
-      expect(termux.calls, 0);
+      expect(bundled.calls, 0);
     });
 
-    test('rejects app-private workspaces before contacting Termux', () async {
+    test('runs in an app-private workspace via the bundled backend',
+        () async {
       final result = await service.execute(
         workspaceRoot: tempDir.path,
         mode: AgentMode.agent,
@@ -129,17 +124,22 @@ void main() {
         ),
       );
 
-      expect(result.output, contains('shared storage'));
-      expect(termux.calls, 0);
+      // No shared-storage gate any more: the app-private temp dir is
+      // a valid workspace and the command runs via bundled.
+      expect(result.isError, isFalse);
+      expect(result.output, contains('"backend":"bundled"'));
+      expect(result.output, contains('ok'));
+      expect(bundled.calls, 1);
     });
 
     test('serializes stdout, stderr, and exit code for the model', () {
-      final serialized = TermuxRuntimeService.formatOutputForTool(
-        const TermuxCommandResult(
+      final serialized = jsonEncode(
+        const CommandResult(
           stdout: 'build output',
           stderr: 'warning',
           exitCode: 7,
-        ),
+          backend: 'bundled',
+        ).toJson(),
       );
       final result = jsonDecode(serialized) as Map<String, dynamic>;
       expect(result['stdout'], 'build output');
