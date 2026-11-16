@@ -53,7 +53,6 @@ class ToolExecutionResult {
   Map<String, dynamic> toApiMap() => {
     'role': 'tool',
     'tool_call_id': callId,
-    'name': toolName,
     'content': output,
   };
 }

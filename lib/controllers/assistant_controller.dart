@@ -105,10 +105,11 @@ class AssistantController extends GetxController {
   final RxString streamingText = ''.obs;
   final RxBool isRestoringSession = false.obs;
 
-  /// Explains why a task ran without tools (Batch 6 — desain D10):
-  /// the gateway does not support tool calling, so the engine fell
-  /// back to diff-only mode. Shown as a banner until the next task
-  /// starts. Empty when no fallback happened.
+  /// Explains why a task ran without tools (Batch 6 — desain D10,
+  /// plus the tool-history rejection fallback): the gateway could
+  /// not run tool calls, so the engine fell back to diff-only mode.
+  /// Shown as a banner until the next task starts. Empty when no
+  /// fallback happened.
   final RxString diffOnlyNotice = ''.obs;
 
   /// Tool-call records of the active task, oldest first (Batch 5 —
@@ -634,7 +635,7 @@ class AssistantController extends GetxController {
         _gatewayToolsUnsupported = true;
         _toolsUnsupportedProfileId = profile.id;
         diffOnlyNotice.value =
-            '${profile.name} does not support tool calling, so this task '
+            '${profile.name} could not run tool calls, so this task '
             'continued with diff proposals instead of running tools. '
             'Review the proposed diff to apply the changes.';
       }

@@ -25,11 +25,17 @@ class LlmStreamResponse {
 
 class _ToolCallAccumulator {
   final int index;
-  String id = '';
+
+  /// The provider may stream a tool call without an `id` (some
+  /// OpenAI-compatible gateways do). A follow-up request carrying an
+  /// empty `tool_call_id` is rejected with HTTP 400, so the id
+  /// starts as a deterministic fallback and is only replaced when a
+  /// real id arrives.
+  String id;
   String name = '';
   final StringBuffer arguments = StringBuffer();
 
-  _ToolCallAccumulator(this.index);
+  _ToolCallAccumulator(this.index) : id = 'call_$index';
 
   void merge(Map<String, dynamic> chunk) {
     if (chunk['id'] is String && (chunk['id'] as String).isNotEmpty) {
@@ -46,8 +52,50 @@ class _ToolCallAccumulator {
     }
   }
 
-  ToolCallInfo toToolCallInfo() =>
-      ToolCallInfo(id: id, name: name, arguments: arguments.toString());
+  ToolCallInfo toToolCallInfo() => ToolCallInfo(
+    id: id,
+    name: name,
+    arguments: _sanitizedToolArguments(arguments.toString()),
+  );
+}
+
+/// Tool-call arguments must be a JSON string: an empty or truncated
+/// argument list is repaired to `{}` so the follow-up request stays
+/// valid — the failed call itself is already reported to the model
+/// as a tool error.
+String _sanitizedToolArguments(String raw) {
+  if (raw.trim().isEmpty) return '{}';
+  try {
+    jsonDecode(raw);
+    return raw;
+  } catch (_) {
+    return '{}';
+  }
+}
+
+/// Provider error detail for a failed HTTP response: the provider's
+/// own `error.message` when present, otherwise a short slice of the
+/// raw body, otherwise just the status. The old code showed a bare
+/// "HTTP 400" with no clue what the provider rejected.
+String _providerErrorDetail(int statusCode, String body) {
+  try {
+    final parsed = jsonDecode(body);
+    if (parsed is Map && parsed['error'] != null) {
+      final errObj = parsed['error'];
+      if (errObj is Map && errObj['message'] != null) {
+        return 'HTTP $statusCode: ${errObj['message']}';
+      } else if (errObj is String) {
+        return 'HTTP $statusCode: $errObj';
+      }
+    }
+  } catch (_) {}
+  final flat = body.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (flat.isEmpty) return 'HTTP $statusCode';
+  const maxDetailChars = 300;
+  final shown = flat.length > maxDetailChars
+      ? '${flat.substring(0, maxDetailChars)}…'
+      : flat;
+  return 'HTTP $statusCode: $shown';
 }
 
 class LlmService {
@@ -91,7 +139,8 @@ class LlmService {
           .timeout(_timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw LlmServiceException(
-          'Request to ${profile.name} failed with HTTP ${response.statusCode}.',
+          'Request to ${profile.name} failed '
+          '(${_providerErrorDetail(response.statusCode, response.body)}).',
         );
       }
       final data = jsonDecode(response.body);
@@ -190,20 +239,9 @@ class LlmService {
       if (streamedResponse.statusCode < 200 ||
           streamedResponse.statusCode >= 300) {
         final errBody = await streamedResponse.stream.bytesToString();
-        String errorMsg = 'HTTP ${streamedResponse.statusCode}';
-        try {
-          final errJson = jsonDecode(errBody);
-          if (errJson is Map && errJson['error'] != null) {
-            final errObj = errJson['error'];
-            if (errObj is Map && errObj['message'] != null) {
-              errorMsg = errObj['message'].toString();
-            } else if (errObj is String) {
-              errorMsg = errObj;
-            }
-          }
-        } catch (_) {}
         throw LlmServiceException(
-          'Request to ${profile.name} failed ($errorMsg).',
+          'Request to ${profile.name} failed '
+          '(${_providerErrorDetail(streamedResponse.statusCode, errBody)}).',
         );
       }
 
@@ -299,14 +337,18 @@ class LlmService {
               if (message['tool_calls'] is List) {
                 final tcs = message['tool_calls'] as List;
                 final list = <ToolCallInfo>[];
-                for (final tc in tcs) {
+                for (var i = 0; i < tcs.length; i++) {
+                  final tc = tcs[i];
                   if (tc is Map<String, dynamic>) {
                     final fn = tc['function'] as Map<String, dynamic>? ?? {};
+                    final rawId = (tc['id'] ?? '').toString();
                     list.add(
                       ToolCallInfo(
-                        id: (tc['id'] ?? '').toString(),
+                        id: rawId.isEmpty ? 'call_$i' : rawId,
                         name: (fn['name'] ?? '').toString(),
-                        arguments: (fn['arguments'] ?? '').toString(),
+                        arguments: _sanitizedToolArguments(
+                          (fn['arguments'] ?? '').toString(),
+                        ),
                       ),
                     );
                   }
