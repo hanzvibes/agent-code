@@ -57,11 +57,17 @@ class ToolProbe {
   /// Backend that has the tool (`bundled`), or `none`.
   final String backend;
 
+  /// Why a bundled tool is unavailable (for example the bundled
+  /// runtime failed to set up on this device). Null when the tool
+  /// simply is not in the bundle, or when the probe succeeded.
+  final String? detail;
+
   const ToolProbe({
     required this.tool,
     required this.available,
     this.version,
     required this.backend,
+    this.detail,
   });
 
   Map<String, dynamic> toJson() => {
@@ -69,6 +75,7 @@ class ToolProbe {
     'available': available,
     'version': version,
     'backend': backend,
+    if (detail != null) 'detail': detail,
   };
 }
 
@@ -478,6 +485,19 @@ class BundledRuntimeBackend implements RuntimeBackend {
 
   Future<_BundledSetup?>? _setupFuture;
 
+  /// Why the last setup failed, or null when setup succeeded (or
+  /// never ran). Read after [hasTool]/[run] so the cached setup has
+  /// run: a null setup leaves every tool unavailable with no other
+  /// trace, so the reason is what makes a tablet failure
+  /// diagnosable (for example the marker library missing from
+  /// nativeLibraryDir because the APK was built without extracted
+  /// native libraries).
+  String? _setupFailureReason;
+
+  /// Why the bundled runtime is unavailable, or null when it is
+  /// ready. See [_setupFailureReason].
+  String? get setupFailureReason => _setupFailureReason;
+
   BundledRuntimeBackend({
     BundledRuntimePathsProvider? pathsProvider,
     BundledProcessRunner? processRunner,
@@ -562,9 +582,11 @@ class BundledRuntimeBackend implements RuntimeBackend {
     }
     final setup = await _ensureSetup();
     if (setup == null) {
-      return const CommandResult(
+      return CommandResult(
         exitCode: 127,
-        error: notAvailableMessage,
+        error: _setupFailureReason == null
+            ? notAvailableMessage
+            : '$notAvailableMessage $_setupFailureReason',
         backend: 'bundled',
       );
     }
@@ -642,13 +664,26 @@ class BundledRuntimeBackend implements RuntimeBackend {
     try {
       paths = await _pathsProvider.fetch();
     } catch (_) {
+      _setupFailureReason =
+          'Could not read the bundled runtime paths from the '
+          'Android side.';
       return null;
     }
-    if (paths == null) return null;
+    if (paths == null) {
+      _setupFailureReason =
+          'The Android side reported no bundled runtime paths.';
+      return null;
+    }
     // Availability probe: the marker library of the Tier 2 bundle.
     // A build without jniLibs (for example armeabi-v7a) has no
     // bundled runtime at all.
     if (!File('${paths.nativeLibraryDir}/libgit.so').existsSync()) {
+      _setupFailureReason =
+          'libgit.so is missing from nativeLibraryDir '
+          '(${paths.nativeLibraryDir}): the APK was built without '
+          'extracted native libraries (android:extractNativeLibs '
+          'must be true) so the bundled tools were never extracted '
+          'to the device.';
       return null;
     }
     final engineDir = '${paths.filesDir}/engine';
@@ -661,7 +696,9 @@ class BundledRuntimeBackend implements RuntimeBackend {
       await _linkTools(paths.nativeLibraryDir, engineDir);
       await _linkGitCore(engineDir);
       await _writeGitConfig('$engineDir/home');
-    } catch (_) {
+    } catch (e) {
+      _setupFailureReason =
+          'Bundled runtime setup failed while staging the tools ($e).';
       return null;
     }
     return _BundledSetup(
@@ -957,6 +994,19 @@ class RuntimeService {
   }) async =>
       _bundled.hasTool(name, workspaceRoot: workspaceRoot, cwd: cwd);
 
+  /// Why the bundled backend is unavailable, or null when it is
+  /// ready (or the backend is not the bundled one). Triggers the
+  /// cached one-time setup first, so the reason is recorded by the
+  /// time it is read. This is what lets [probeTool] and [run] say
+  /// WHY a bundled tool is unavailable instead of only that it is.
+  Future<String?> bundledSetupFailureReason() async {
+    await _bundled.hasTool('git');
+    final backend = _bundled;
+    return backend is BundledRuntimeBackend
+        ? backend.setupFailureReason
+        : null;
+  }
+
   /// Probes one tool: whether the bundle has it and what
   /// `<tool> --version` reports. The version is the first non-empty
   /// output line. A tool the bundle does not have reports
@@ -971,7 +1021,19 @@ class RuntimeService {
     }
     final backend = await selectBackendForTool(tool);
     if (backend == noBackendName) {
-      return ToolProbe(tool: tool, available: false, backend: noBackendName);
+      // A bundled tool with no backend means the setup failed, not
+      // that the tool is missing from the bundle: say why, so the
+      // failure is diagnosable from the device. A tool the bundle
+      // never had keeps detail null.
+      final detail = BundledRuntimeBackend.bundledTools.containsKey(tool)
+          ? await bundledSetupFailureReason()
+          : null;
+      return ToolProbe(
+        tool: tool,
+        available: false,
+        backend: noBackendName,
+        detail: detail,
+      );
     }
     final result = await _bundled.run(
       command: '$tool --version',
@@ -1045,9 +1107,17 @@ class RuntimeService {
     if (tool.isNotEmpty && !_systemApplets.contains(tool)) {
       final backendName = await selectBackendForTool(tool);
       if (backendName == noBackendName) {
+        // Same distinction as [probeTool]: a bundled tool refused
+        // here means the setup failed — name the reason in the
+        // error instead of only naming the missing tool.
+        final reason = BundledRuntimeBackend.bundledTools.containsKey(tool)
+            ? await bundledSetupFailureReason()
+            : null;
         return CommandResult(
           exitCode: 127,
-          error: missingToolMessage(tool),
+          error: reason == null
+              ? missingToolMessage(tool)
+              : '${missingToolMessage(tool)} $reason',
           backend: noBackendName,
         );
       }

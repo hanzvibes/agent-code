@@ -361,6 +361,36 @@ void main() {
       }
     });
 
+    test('records why setup failed when the marker library is missing',
+        () async {
+      // Regression: the shipped APK had extractNativeLibs=false, so
+      // nativeLibraryDir held no libgit.so and every tool reported
+      // unavailable with no reason. The reason must name the
+      // missing marker and the manifest attribute that causes it.
+      final h = await _makeHarness(withLibs: false);
+      try {
+        expect(await h.backend.hasTool('git'), isFalse);
+        expect(h.backend.setupFailureReason, contains('libgit.so'));
+        expect(
+          h.backend.setupFailureReason,
+          contains('extractNativeLibs'),
+        );
+        final result = await h.backend.run(
+          command: 'git --version',
+          workspaceRoot: '/tmp',
+          cwd: '/tmp',
+        );
+        expect(result.exitCode, 127);
+        expect(
+          result.error,
+          contains(BundledRuntimeBackend.notAvailableMessage),
+        );
+        expect(result.error, contains('libgit.so'));
+      } finally {
+        await h.dispose();
+      }
+    });
+
     test('hasTool is false for tools outside the bundle', () async {
       final h = await _makeHarness();
       try {
@@ -617,6 +647,44 @@ void main() {
       }
     });
 
+    test('probeTool explains a setup failure for a bundled tool',
+        () async {
+      // Same missing-marker setup as the backend test above, seen
+      // through the service: a bundled tool's probe carries the
+      // reason in `detail`, while a tool the bundle never had gets
+      // no detail — it is simply absent.
+      final h = await _makeHarness(withLibs: false);
+      try {
+        final runtime = RuntimeService(bundled: h.backend);
+        final nodeProbe = await runtime.probeTool(
+          'node',
+          workspaceRoot: '/tmp',
+          cwd: '/tmp',
+        );
+        expect(nodeProbe.available, isFalse);
+        expect(nodeProbe.backend, RuntimeService.noBackendName);
+        expect(nodeProbe.detail, contains('libgit.so'));
+        expect(nodeProbe.detail, contains('extractNativeLibs'));
+        final makeProbe = await runtime.probeTool(
+          'make',
+          workspaceRoot: '/tmp',
+          cwd: '/tmp',
+        );
+        expect(makeProbe.available, isFalse);
+        expect(makeProbe.detail, isNull);
+        final run = await runtime.run(
+          command: 'node --version',
+          workspaceRoot: '/tmp',
+          workingDirectory: '/tmp',
+        );
+        expect(run.exitCode, 127);
+        expect(run.error, contains('Tool "node"'));
+        expect(run.error, contains('libgit.so'));
+      } finally {
+        await h.dispose();
+      }
+    });
+
     test('invalidateToolCache re-selects after a tool is staged',
         () async {
       // ffmpeg is NOT staged yet: selection reports no backend.
@@ -744,6 +812,21 @@ void main() {
       } finally {
         await h.dispose();
       }
+    });
+  });
+
+  group('App manifest (regression: extractNativeLibs)', () {
+    test('extracts native libraries so the bundled tools reach the device',
+        () {
+      // flutter test runs with the package root as the working
+      // directory. Without this attribute AGP defaults to
+      // extractNativeLibs=false (minSdk >= 23): the .so files stay
+      // inside the APK, nativeLibraryDir holds no libgit.so, setup
+      // fails, and every bundled tool reports unavailable in ~4 ms.
+      final manifest =
+          File('android/app/src/main/AndroidManifest.xml')
+              .readAsStringSync();
+      expect(manifest, contains('android:extractNativeLibs="true"'));
     });
   });
 }
