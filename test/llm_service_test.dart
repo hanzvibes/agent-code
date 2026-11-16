@@ -93,4 +93,42 @@ void main() {
       expect(captured!.headers.containsKey('authorization'), isFalse);
     },
   );
+
+  test('includes the provider error message on HTTP 400', () async {
+    final client = MockClient((request) async {
+      return http.Response(
+        jsonEncode({
+          'error': {'message': 'Invalid tool_call_id'},
+        }),
+        400,
+      );
+    });
+    final profile = ProviderProfile(
+      id: 'local',
+      name: 'Local Gateway',
+      baseUrl: 'https://gateway.example/v1',
+      modelId: 'custom-model',
+    );
+
+    await expectLater(
+      () => LlmService(clientFactory: () => client).chat(
+        profile: profile,
+        apiKey: 'example-key',
+        messages: [
+          ChatMessage(
+            role: 'user',
+            content: 'Hello',
+            timestamp: DateTime(2026),
+          ),
+        ],
+      ),
+      throwsA(
+        isA<LlmServiceException>().having(
+          (e) => e.message,
+          'message',
+          contains('Invalid tool_call_id'),
+        ),
+      ),
+    );
+  });
 }

@@ -753,7 +753,7 @@ void _batch6ControllerMain() {
       expect(assistantController.diffOnlyNotice.value, isNotEmpty);
       expect(
         assistantController.diffOnlyNotice.value,
-        contains('does not support tool calling'),
+        contains('could not run tool calls'),
       );
       expect(assistantController.pendingPatch.value, isNotEmpty);
       expect(assistantController.pendingPatch.value, contains('notes.txt'));

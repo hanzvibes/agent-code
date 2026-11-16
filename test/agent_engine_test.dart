@@ -490,4 +490,112 @@ void main() {
       expect(content, contains('filler line 199'));
     });
   });
+
+  group('AgentEngine tool-call history (HTTP 400 fallback)', () {
+    test('follow-up request carries a spec-shaped tool exchange', () async {
+      final llm = ScriptedLlmService([
+        LlmStreamResponse(
+          toolCalls: [_toolCall('call_9', 'list_project_files')],
+        ),
+        const LlmStreamResponse(text: 'Done.'),
+      ]);
+      final task = AgentTask(title: 't');
+      final result = await _run(
+        _engine(llm: llm),
+        task,
+        llm,
+        tools: _workspaceTools,
+      );
+
+      expect(result.stopReason, AgentStopReason.finished);
+      expect(llm.requestCount, 2);
+      final assistantMessage = llm.lastMessages.firstWhere(
+        (m) => m['role'] == 'assistant',
+      );
+      final toolCalls = assistantMessage['tool_calls'] as List;
+      expect(toolCalls.single['id'], 'call_9');
+      expect(toolCalls.single['type'], 'function');
+      final toolMessage = llm.lastMessages.firstWhere(
+        (m) => m['role'] == 'tool',
+      );
+      expect(toolMessage['tool_call_id'], 'call_9');
+      // Tool messages carry only role + tool_call_id + content (the
+      // OpenAI shape): an extra `name` field is rejected by strict
+      // gateways with HTTP 400.
+      expect(toolMessage.containsKey('name'), isFalse);
+    });
+
+    test(
+      'falls back to diff-only when the provider rejects a follow-up after a tool call',
+      () async {
+        final llm = ScriptedLlmService([
+          LlmStreamResponse(
+            toolCalls: [_toolCall('call_9', 'list_project_files')],
+          ),
+          const LlmServiceException(
+            'Request to Test Gateway failed (HTTP 400).',
+          ),
+          const LlmStreamResponse(text: 'Here is the diff.'),
+        ]);
+        final task = AgentTask(title: 't');
+        final result = await _run(
+          _engine(llm: llm),
+          task,
+          llm,
+          tools: _workspaceTools,
+        );
+
+        expect(result.stopReason, AgentStopReason.finished);
+        expect(result.finalText, 'Here is the diff.');
+        expect(result.diffOnlyFallback, isTrue);
+        expect(task.status, TaskStatus.done);
+        expect(llm.requestCount, 3);
+        // The retry request carries no tools and no tool-call history.
+        expect(llm.lastTools, isNull);
+        expect(
+          llm.lastMessages.any(
+            (m) =>
+                m['role'] == 'assistant' &&
+                m['tool_calls'] is List &&
+                (m['tool_calls'] as List).isNotEmpty,
+          ),
+          isFalse,
+        );
+        expect(
+          llm.lastMessages.any(
+            (m) =>
+                m['role'] == 'user' &&
+                (m['content'] as String).contains(
+                  'rejected the request containing',
+                ),
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'still fails the task when the first request is rejected with HTTP 400',
+      () async {
+        final llm = ScriptedLlmService([
+          const LlmServiceException(
+            'Request to Test Gateway failed (HTTP 400).',
+          ),
+        ]);
+        final task = AgentTask(title: 't');
+        final result = await _run(
+          _engine(llm: llm),
+          task,
+          llm,
+          tools: _workspaceTools,
+        );
+
+        expect(result.stopReason, AgentStopReason.failed);
+        expect(result.diffOnlyFallback, isFalse);
+        expect(result.detail, contains('HTTP 400'));
+        expect(task.status, TaskStatus.failed);
+        expect(llm.requestCount, 1);
+      },
+    );
+  });
 }
