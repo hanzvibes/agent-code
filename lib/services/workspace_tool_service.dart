@@ -8,6 +8,7 @@ import 'android_native_action_service.dart';
 import 'checkpoint_store.dart';
 import 'permission_service.dart';
 import 'project_detector.dart';
+import 'project_scaffolder.dart';
 import 'runtime_service.dart';
 import 'search_service.dart';
 import 'tool_registry.dart';
@@ -84,7 +85,7 @@ class WorkspaceToolService {
       'function': {
         'name': 'run_project_command',
         'description':
-            'Runs one shell command through the bundled runtime in the open project or a project-relative subfolder (the runtime picks the backend and records it in the result). For a concrete user request to build, test, or run something, execute the task instead of giving a tutorial: inspect the environment, then run and verify the task. Only the pre-installed bundled tools are available (git, Node/npm, Python, rg, jq, curl, xz, tar, ffmpeg, bash, and common system applets such as ls/grep/sed); there is no package manager and no way to install a missing tool, so do not promise installs — if a tool is missing, say so and suggest an alternative that uses the bundled tools. Use the existing project package manager (npm/pip) only to install requested project dependencies, not runtimes. Routine installs explicitly requested by the user do not need another confirmation. Commands can change files and access device files/network. Ask before destructive/high-impact actions or sending private data off-device. Return actual output and exit status; do not claim work that was not run. Commands are bounded to 1–120 seconds, 32 KB, and 16 KB output per stream.',
+            'Runs one shell command through the bundled runtime in the open project or a project-relative subfolder (the runtime picks the backend and records it in the result). For a concrete user request to build, test, or run something, execute the task instead of giving a tutorial: inspect the environment, then run and verify the task. Only the pre-installed bundled tools are available (git, Node/npm, Python, rg, jq, curl, xz, tar, ffmpeg, bash, and common system applets such as ls/grep/sed); there is no package manager and no way to install a missing tool, so do not promise installs — if a tool is missing, say so and suggest an alternative that uses the bundled tools. Use the existing project package manager (npm/pip) only to install requested project dependencies, not runtimes. Routine installs explicitly requested by the user do not need another confirmation. Commands can change files and access device files/network. Ask before destructive/high-impact actions or sending private data off-device. Return actual output and exit status; do not claim work that was not run. Commands are bounded to 1–120 seconds, 32 KB, and 16 KB output per stream. When the requested task belongs to a different stack than the open project, do not refuse it: work in the matching sub-project via working_directory, or scaffold it first with scaffold_project, then continue there.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -295,11 +296,16 @@ class WorkspaceToolService {
           stepId: stepId,
         );
       case 'detect_project':
-        return _executeDetectProject(workspaceRoot, callId);
+        return _executeDetectProject(workspaceRoot, call);
       case 'probe_toolchain':
         // Read-only (Batch 4 — desain D6): probing runs in every
         // mode, no runtime opt-in needed.
         return _executeProbeToolchain(workspaceRoot, call);
+      case 'scaffold_project':
+        // Write-class (general harness, D11): creates a sub-project
+        // and may run install commands — permission-checked above
+        // like run_project_command.
+        return _executeScaffoldProject(workspaceRoot, call);
       case 'run_project_command':
         // Permission-checked above (Batch 4): Plan denies it, Agent
         // asks for dangerous commands, Auto runs them.
@@ -325,7 +331,7 @@ class WorkspaceToolService {
                 'list_project_files, read_project_file, search_project, '
                 'write_file, edit_file, create_file, delete_file, '
                 'detect_project, probe_toolchain, run_project_command, '
-                'android_action.',
+                'scaffold_project, android_action.',
           }),
           summary: 'Blocked unauthorized tool "$name"',
           isError: true,
@@ -447,24 +453,84 @@ class WorkspaceToolService {
     }
   }
 
+  /// Resolves a workspace-relative subfolder to its canonical
+  /// absolute path, or null when it is unsafe, outside the workspace,
+  /// or does not exist. '' / '.' means the workspace root itself.
+  Future<String?> _resolveSubPath(
+    String workspaceRoot,
+    String relativePath,
+  ) async {
+    final raw = relativePath.trim();
+    final root = await Directory(workspaceRoot).resolveSymbolicLinks();
+    if (raw.isEmpty || raw == '.') return root;
+    if (!ScaffoldPlan.isSafeRelativePath(raw)) return null;
+    final candidate = p.normalize(
+      p.join(root, raw.replaceAll('\\', '/')),
+    );
+    if (candidate != root && !p.isWithin(root, candidate)) return null;
+    if (!await Directory(candidate).exists()) return null;
+    final canonical = await Directory(candidate).resolveSymbolicLinks();
+    if (canonical != root && !p.isWithin(root, canonical)) return null;
+    return canonical;
+  }
+
   /// Detects the project kind from root marker files (Batch 3 —
   /// desain D4). Pure file-system work, no runtime needed.
+  ///
+  /// General harness (D11): without a `path` argument the result
+  /// also lists every project in the workspace (`projects`: root +
+  /// subfolders); with `path` it detects that one sub-project.
   Future<ToolExecutionResult> _executeDetectProject(
     String workspaceRoot,
-    String callId,
+    ToolCallInfo call,
   ) async {
-    final info = await ProjectDetector.detect(workspaceRoot);
+    final args = _decodeArgs(call);
+    final rawPath = args?['path'] is String
+        ? (args!['path'] as String).trim()
+        : '';
+    if (rawPath.isNotEmpty && rawPath != '.') {
+      final dir = await _resolveSubPath(workspaceRoot, rawPath);
+      if (dir == null) {
+        return _toolError(
+          call,
+          'Path "$rawPath" is not a folder inside the workspace.',
+          'Invalid project path',
+        );
+      }
+      final root = await Directory(workspaceRoot).resolveSymbolicLinks();
+      final rel = p
+          .relative(dir, from: root)
+          .replaceAll('\\', '/');
+      final info = await ProjectDetector.detectAt(workspaceRoot, rel);
+      return ToolExecutionResult(
+        callId: call.id,
+        toolName: 'detect_project',
+        output: jsonEncode(info.toJson()),
+        summary: 'Detected ${info.type.label} project at $rel',
+      );
+    }
+    final rootInfo = await ProjectDetector.detect(workspaceRoot);
+    final projects = await ProjectDetector.detectAll(workspaceRoot);
     return ToolExecutionResult(
-      callId: callId,
+      callId: call.id,
       toolName: 'detect_project',
-      output: jsonEncode(info.toJson()),
-      summary: 'Detected ${info.type.label} project',
+      output: jsonEncode({
+        ...rootInfo.toJson(),
+        'projects': projects.map((project) => project.toJson()).toList(),
+      }),
+      summary: projects.length == 1
+          ? 'Detected ${rootInfo.type.label} project'
+          : 'Detected ${projects.length} projects '
+                '(${projects.map((project) => project.type.label).join(', ')})',
     );
   }
 
   /// Probes the toolchain on the runtime (Batch 3 — desain D4):
   /// `<tool> --version` for the tools relevant to the detected
   /// project kind (or the tools the model named), via [RuntimeService].
+  ///
+  /// General harness (D11): an optional `path` argument probes in
+  /// that sub-project instead of the workspace root.
   Future<ToolExecutionResult> _executeProbeToolchain(
     String workspaceRoot,
     ToolCallInfo call,
@@ -478,13 +544,30 @@ class WorkspaceToolService {
           .where((tool) => tool.isNotEmpty)
           .toList();
     }
-    final info = await ProjectDetector.detect(workspaceRoot);
+    var probeRoot = workspaceRoot;
+    var probeRel = '.';
+    final rawPath = args?['path'] is String
+        ? (args!['path'] as String).trim()
+        : '';
+    if (rawPath.isNotEmpty && rawPath != '.') {
+      final dir = await _resolveSubPath(workspaceRoot, rawPath);
+      if (dir == null) {
+        return _toolError(
+          call,
+          'Path "$rawPath" is not a folder inside the workspace.',
+          'Invalid project path',
+        );
+      }
+      probeRoot = dir;
+      probeRel = rawPath.replaceAll('\\', '/');
+    }
+    final info = await ProjectDetector.detect(probeRoot);
     final tools = requested == null || requested.isEmpty
         ? ProjectDetector.defaultProbeTools(info.type)
         : requested;
     final probes = await _runtime.probeTools(
       tools,
-      workspaceRoot: workspaceRoot,
+      workspaceRoot: probeRoot,
     );
     final availableCount = probes.where((probe) => probe.available).length;
     return ToolExecutionResult(
@@ -492,11 +575,77 @@ class WorkspaceToolService {
       toolName: call.name,
       output: jsonEncode({
         'project_type': info.type.id,
+        'path': probeRel,
         'tools': probes.map((probe) => probe.toJson()).toList(),
       }),
       summary:
-          'Probed ${probes.length} tools ($availableCount available) for ${info.type.label}',
+          'Probed ${probes.length} tools ($availableCount available) for ${info.type.label}'
+          '${probeRel == '.' ? '' : ' at $probeRel'}',
     );
+  }
+
+  /// Scaffolds a new sub-project for the requested stack (general
+  /// harness, D11). The scaffolder reports its own failures; this
+  /// wrapper only maps them onto tool errors.
+  Future<ToolExecutionResult> _executeScaffoldProject(
+    String workspaceRoot,
+    ToolCallInfo call,
+  ) async {
+    final args = _decodeArgs(call);
+    final stackRaw = args?['stack'];
+    if (stackRaw is! String || stackRaw.trim().isEmpty) {
+      return _toolError(
+        call,
+        'Missing or invalid "stack" (node, python or generic).',
+        'Invalid scaffold request',
+      );
+    }
+    final stack = ScaffoldStack.parse(stackRaw);
+    if (stack == null) {
+      return _toolError(
+        call,
+        'Unknown stack "$stackRaw" (node, python or generic).',
+        'Unknown stack',
+      );
+    }
+    final pathRaw = args?['path'];
+    if (pathRaw is! String || pathRaw.trim().isEmpty) {
+      return _toolError(
+        call,
+        'Missing or invalid "path" (workspace-relative subfolder).',
+        'Invalid scaffold request',
+      );
+    }
+    final packages = <String>[];
+    if (args?['packages'] is List) {
+      for (final item in (args!['packages'] as List)) {
+        if (item is String && item.trim().isNotEmpty) {
+          packages.add(item.trim());
+        }
+      }
+    }
+    try {
+      final result = await ProjectScaffolder(
+        runtimeService: _runtime,
+      ).scaffold(
+        workspaceRoot: workspaceRoot,
+        relativePath: pathRaw.trim(),
+        stack: stack,
+        packages: packages,
+      );
+      return ToolExecutionResult(
+        callId: call.id,
+        toolName: call.name,
+        output: jsonEncode(result.toJson()),
+        summary:
+            'Scaffolded ${stack.label} project at ${result.relativePath} '
+            '(${result.info.type.label})',
+      );
+    } on ScaffoldException catch (error) {
+      return _toolError(call, error.message, 'Scaffold failed');
+    } catch (error) {
+      return _toolError(call, 'Scaffold failed: $error', 'Scaffold failed');
+    }
   }
 
   Future<ToolExecutionResult> _executeAndroidAction(

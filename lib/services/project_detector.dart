@@ -46,12 +46,22 @@ class ProjectInfo {
   /// order (e.g. `['pubspec.yaml']`).
   final List<String> markers;
 
-  const ProjectInfo({required this.type, this.markers = const []});
+  /// Workspace-relative path of this project ('.' = workspace root).
+  /// General harness (D11): a workspace can hold several projects
+  /// (root + subfolders), each detected on its own.
+  final String relativePath;
+
+  const ProjectInfo({
+    required this.type,
+    this.markers = const [],
+    this.relativePath = '.',
+  });
 
   Map<String, dynamic> toJson() => {
     'type': type.id,
     'label': type.label,
     'markers': markers,
+    'path': relativePath,
   };
 }
 
@@ -104,18 +114,82 @@ class ProjectDetector {
 
   /// Detects the project kind from marker files at [workspaceRoot].
   static Future<ProjectInfo> detect(String workspaceRoot) async {
+    return detectAt(workspaceRoot, '.');
+  }
+
+  /// Detects the project kind from marker files at [relativePath]
+  /// under [workspaceRoot] ('.' = the root itself).
+  static Future<ProjectInfo> detectAt(
+    String workspaceRoot,
+    String relativePath,
+  ) async {
+    final dir = relativePath == '.'
+        ? workspaceRoot
+        : p.join(workspaceRoot, relativePath);
     for (final entry in _markers.entries) {
       final found = <String>[];
       for (final marker in entry.value) {
-        if (await File(p.join(workspaceRoot, marker)).exists()) {
+        if (await File(p.join(dir, marker)).exists()) {
           found.add(marker);
         }
       }
       if (found.isNotEmpty) {
-        return ProjectInfo(type: entry.key, markers: found);
+        return ProjectInfo(
+          type: entry.key,
+          markers: found,
+          relativePath: relativePath,
+        );
       }
     }
-    return const ProjectInfo(type: ProjectType.generic);
+    return ProjectInfo(type: ProjectType.generic, relativePath: relativePath);
+  }
+
+  /// Directories never treated as projects when scanning for
+  /// sub-projects (build output, dependency trees, VCS, trash).
+  static const Set<String> _ignoredSubdirs = {
+    '.git',
+    'build',
+    '.dart_tool',
+    'node_modules',
+    '.gradle',
+    '.idea',
+    '__pycache__',
+    '.venv',
+    'venv',
+    '.codeharness-trash',
+    '.DS_Store',
+  };
+
+  /// Maximum projects returned (root + subfolders) — bounds the
+  /// scan so a huge workspace cannot flood the prompt.
+  static const int maxDetectedProjects = 20;
+
+  /// Detects every project in the workspace: the root plus each
+  /// immediate subdirectory that holds marker files (general
+  /// harness, D11). The root is always first, even when generic.
+  /// Sub-projects are sorted by path for a stable result.
+  static Future<List<ProjectInfo>> detectAll(String workspaceRoot) async {
+    final projects = <ProjectInfo>[await detect(workspaceRoot)];
+    try {
+      final entries = await Directory(workspaceRoot).list().toList();
+      final subdirs = <String>[];
+      for (final entry in entries) {
+        if (entry is! Directory) continue;
+        final name = p.basename(entry.path);
+        if (_ignoredSubdirs.contains(name)) continue;
+        if (name.startsWith('.')) continue;
+        subdirs.add(name);
+      }
+      subdirs.sort();
+      for (final name in subdirs) {
+        if (projects.length >= maxDetectedProjects) break;
+        final info = await detectAt(workspaceRoot, name);
+        if (info.markers.isNotEmpty) projects.add(info);
+      }
+    } catch (_) {
+      // An unreadable root still reports the root project above.
+    }
+    return projects;
   }
 
   /// Standard verify commands for a project kind (desain D4).

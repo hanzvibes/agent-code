@@ -4,6 +4,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/agent_task.dart';
+import 'project_scaffolder.dart';
 
 /// What a permission check decided (Batch 4 — desain D6).
 enum PermissionDecision {
@@ -297,6 +298,72 @@ class PermissionService {
             : null,
         permissions: permissions,
       );
+    }
+    if (toolName == 'scaffold_project') {
+      // General harness (D11): scaffolding creates a sub-project
+      // and may run install commands, so it is checked like a
+      // command — Plan mode denies it, Agent asks for installs,
+      // Auto runs them (except the hard-deny list).
+      final stackRaw = args['stack'];
+      final stack = stackRaw is String
+          ? ScaffoldStack.parse(stackRaw)
+          : null;
+      if (stack == null) {
+        return const PermissionCheck(
+          decision: PermissionDecision.denied,
+          reason: 'Unknown stack (node, python or generic).',
+        );
+      }
+      final pathRaw = args['path'];
+      if (pathRaw is! String ||
+          !ScaffoldPlan.isSafeRelativePath(pathRaw)) {
+        return const PermissionCheck(
+          decision: PermissionDecision.denied,
+          reason:
+              'Scaffold path must be a safe workspace-relative folder '
+              '(no leading slash, no dot or parent segments).',
+        );
+      }
+      final packages = <String>[];
+      if (args['packages'] is List) {
+        for (final item in (args['packages'] as List)) {
+          if (item is! String ||
+              !ScaffoldPlan.isSafePackageName(item.trim())) {
+            return PermissionCheck(
+              decision: PermissionDecision.denied,
+              reason: 'Unsafe package name: "$item".',
+            );
+          }
+          packages.add(item.trim());
+        }
+      }
+      if (mode == AgentMode.plan) {
+        return const PermissionCheck(
+          decision: PermissionDecision.denied,
+          reason:
+              'Plan mode is read-only: scaffolding creates files and '
+              'runs commands. Switch to Agent mode to scaffold.',
+        );
+      }
+      PermissionCheck? needsApproval;
+      for (final command in ScaffoldPlan.initCommands(stack, packages)) {
+        final check = checkCommand(
+          mode: mode,
+          command: command,
+          workspaceRoot: workspaceRoot,
+          workingDirectory: pathRaw,
+          permissions: permissions,
+        );
+        if (check.decision == PermissionDecision.denied) return check;
+        needsApproval ??= check.decision == PermissionDecision.needsApproval
+            ? check
+            : null;
+      }
+      return needsApproval ??
+          const PermissionCheck(
+            decision: PermissionDecision.allowed,
+            reason: 'Scaffold in Agent/Auto mode.',
+          );
     }
     if (toolName == 'write_file' ||
         toolName == 'edit_file' ||
