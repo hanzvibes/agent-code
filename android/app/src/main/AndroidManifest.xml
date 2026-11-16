@@ -1,6 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+    <!-- Foreground service for the agent loop (Batch 5 — desain D8):
+         keeps the agent running while the app is in the background,
+         with a persistent notification. Android 14+ needs the
+         type-specific permission for the declared service type. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <application
         android:label="Code Harness"
         android:name="${applicationName}"
@@ -36,6 +42,13 @@
         <receiver
             android:name=".TermuxCommandResultReceiver"
             android:exported="false" />
+        <!-- Agent foreground service (Batch 5 — desain D8). Not
+             exported: only this app starts/stops it, via the
+             dev.codeharness/agent_foreground MethodChannel. -->
+        <service
+            android:name=".AgentForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

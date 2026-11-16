@@ -10,9 +10,11 @@ import '../models/chat_message.dart';
 import '../models/checkpoint.dart';
 import '../models/context_snapshot.dart';
 import '../models/file_node.dart';
+import '../models/tool_call_record.dart';
 import '../repositories/chat_repository.dart';
 import '../repositories/profile_repository.dart';
 import '../services/agent_engine.dart';
+import '../services/agent_foreground_service.dart';
 import '../services/android_native_action_service.dart';
 import '../services/agents_instructions_service.dart';
 import '../services/assistant_context_builder.dart';
@@ -21,6 +23,7 @@ import '../services/llm_service.dart';
 import '../services/permission_service.dart';
 import '../services/project_verifier.dart';
 import '../services/runtime_service.dart';
+import '../services/task_store.dart';
 import '../services/tool_registry.dart';
 import '../services/workspace_service.dart';
 import '../services/workspace_tool_service.dart';
@@ -42,9 +45,19 @@ class AssistantController extends GetxController {
   final RuntimeService _runtimeService;
 
   /// Change checkpoints of the active task (Batch 2 — desain D2).
-  /// Owns the undo history for the task's write tools.
+  /// Owns the undo history for the task's write tools. Persisted
+  /// through [taskStore] (Batch 5) so undo survives the app closing.
   final CheckpointStore checkpointStore;
   late final AgentEngine _engine;
+
+  /// Persisted tasks + tool-call records + checkpoints for this
+  /// workspace (Batch 5 — desain D8). A task that stopped mid-work
+  /// is restored from here when the workspace opens again.
+  final TaskStore taskStore;
+
+  /// Foreground service that keeps the agent loop alive in the
+  /// background while a task runs (Batch 5 — desain D8).
+  final AgentForegroundService _foregroundService;
 
   /// Mode + permission rules for this workspace (Batch 4 — desain D6).
   /// The mode is stored per workspace (not reset on workspace change)
@@ -63,6 +76,8 @@ class AssistantController extends GetxController {
     RuntimeService? runtimeService,
     ProjectVerifier? verifier,
     PermissionService? permissionService,
+    TaskStore? taskStore,
+    AgentForegroundService? foregroundService,
   }) : _appController = appController,
        _projectController = projectController,
        _profileRepo = profileRepo,
@@ -70,6 +85,8 @@ class AssistantController extends GetxController {
        _chatRepo = chatRepo ?? ChatRepository(),
        _runtimeService = runtimeService ?? RuntimeService(),
        permissionService = permissionService ?? PermissionService(),
+       taskStore = taskStore ?? TaskStore(),
+       _foregroundService = foregroundService ?? AgentForegroundService(),
        checkpointStore = checkpointStore ?? CheckpointStore() {
     _toolService =
         toolService ?? WorkspaceToolService(runtimeService: _runtimeService);
@@ -86,8 +103,13 @@ class AssistantController extends GetxController {
   final RxString lastError = ''.obs;
   final RxString statusMessage = ''.obs;
   final RxString streamingText = ''.obs;
-  final RxString runtimeOutput = ''.obs;
   final RxBool isRestoringSession = false.obs;
+
+  /// Tool-call records of the active task, oldest first (Batch 5 —
+  /// desain D9). The ActivityTimeline renders one card per record; a
+  /// running call is appended when it starts and updated when it
+  /// finishes. Persisted through [taskStore] with the task.
+  final RxList<ToolCallRecord> toolCallRecords = <ToolCallRecord>[].obs;
 
   /// Active agent task (Batch 1, desain D3/D9). Null when no task has
   /// run yet in this workspace session.
@@ -120,7 +142,6 @@ class AssistantController extends GetxController {
   /// waiting for the answer.
   Future<PermissionApproval> Function(PermissionApprovalRequest request)?
   onPermissionApproval;
-  String _lastRuntimeOutputChannel = '';
 
   CancelToken? _cancelToken;
   Worker? _workspaceWorker;
@@ -180,7 +201,11 @@ class AssistantController extends GetxController {
       final revision = ++_sessionRevision;
       isRestoringSession.value = path.isNotEmpty;
       cancelRequest();
+      // Persist the outgoing task before its in-memory state is
+      // cleared, so it can be resumed when this workspace reopens.
+      unawaited(_persistTask(oldPath));
       activeTask.value = null;
+      toolCallRecords.clear();
       selectedContextPaths.clear();
       messages.clear();
       pendingPatch.value = '';
@@ -189,7 +214,6 @@ class AssistantController extends GetxController {
       lastError.value = '';
       statusMessage.value = '';
       streamingText.value = '';
-      runtimeOutput.value = '';
       unawaited(_saveThenRestore(oldPath, path, oldMessages, revision));
       // The mode is saved per workspace (Batch 4): switching
       // workspaces restores the mode picked for the new workspace
@@ -250,6 +274,7 @@ class AssistantController extends GetxController {
       if (newPath.isEmpty || !_isCurrentSession(newPath, revision)) return;
       final saved = await _chatRepo.load(newPath);
       if (_isCurrentSession(newPath, revision)) messages.assignAll(saved);
+      await _restorePersistedTask(newPath, revision);
     } catch (_) {
       // A failed restore should not block opening or editing the workspace.
     } finally {
@@ -261,10 +286,48 @@ class AssistantController extends GetxController {
     try {
       final saved = await _chatRepo.load(path);
       if (_isCurrentSession(path, revision)) messages.assignAll(saved);
+      await _restorePersistedTask(path, revision);
     } catch (_) {
       // A malformed or unavailable local session is treated as empty.
     } finally {
       if (revision == _sessionRevision) isRestoringSession.value = false;
+    }
+  }
+
+  /// Restores the newest resumable task for [path] (Batch 5 — desain
+  /// D8): the user reopens the workspace, sees the paused task, and
+  /// can press Lanjutkan. Its tool-call records and checkpoints come
+  /// back too, so the timeline and undo still work.
+  Future<void> _restorePersistedTask(String path, int revision) async {
+    if (path.isEmpty) return;
+    TaskSnapshot? snapshot;
+    try {
+      snapshot = await taskStore.loadResumableTask(path);
+    } catch (_) {
+      return;
+    }
+    if (snapshot == null || !_isCurrentSession(path, revision)) return;
+    activeTask.value = snapshot.task;
+    toolCallRecords.assignAll(snapshot.toolCalls);
+    checkpointStore.loadAll(snapshot.checkpoints);
+  }
+
+  /// Persists the active task with its tool-call records and
+  /// checkpoints for [workspacePath] (defaults to the current
+  /// workspace). Best-effort: a failed save never blocks the agent.
+  Future<void> _persistTask([String? workspacePath]) async {
+    final task = activeTask.value;
+    final path = workspacePath ?? _projectController.workspacePath.value;
+    if (task == null || path.isEmpty) return;
+    try {
+      await taskStore.saveTask(
+        path,
+        task,
+        toolCalls: toolCallRecords.toList(),
+        checkpoints: checkpointStore.checkpointsForTask(task.id),
+      );
+    } catch (_) {
+      // Local persistence failure must not prevent using the assistant.
     }
   }
 
@@ -400,15 +463,18 @@ class AssistantController extends GetxController {
     await _runGeneration(pairedUserMessage.content, isRetryOrRegenerate: true);
   }
 
+  /// Runs one generation. With [resumeTask] the existing task is
+  /// continued from the round it stopped at (Batch 5 — desain D8):
+  /// no new task is created, no new user message is added, and a
+  /// short resume note tells the model where it stopped.
   Future<void> _runGeneration(
     String userText, {
     bool isRetryOrRegenerate = false,
+    AgentTask? resumeTask,
   }) async {
     lastError.value = '';
     statusMessage.value = '';
     streamingText.value = '';
-    runtimeOutput.value = '';
-    _lastRuntimeOutputChannel = '';
 
     final profile = _appController.activeProfile.value;
     if (profile == null) {
@@ -426,11 +492,23 @@ class AssistantController extends GetxController {
 
       // Create the task before building context so a Stop pressed while
       // context is still loading still leaves a cancelled task behind.
-      final task = AgentTask(
-        title: _taskTitleFor(userText),
-        mode: agentMode.value,
-      );
-      activeTask.value = task;
+      // A resumed task keeps its id, todos, and budget usage.
+      final AgentTask task;
+      if (resumeTask != null) {
+        task = resumeTask;
+        task.status = TaskStatus.active;
+        task.touch();
+        activeTask.value = task;
+        activeTask.refresh();
+      } else {
+        task = AgentTask(title: _taskTitleFor(userText), mode: agentMode.value);
+        activeTask.value = task;
+        // A fresh task starts with an empty timeline.
+        toolCallRecords.clear();
+      }
+      // The foreground service keeps the loop alive while the app is
+      // in the background (Batch 5 — desain D8); stopped in `finally`.
+      unawaited(_foregroundService.start(task.title));
 
       final (requestMessages, snapshot) = await _buildContextAsync();
       if (request.isCancelled) {
@@ -438,6 +516,15 @@ class AssistantController extends GetxController {
         task.touch();
         activeTask.refresh();
         return;
+      }
+      if (resumeTask != null) {
+        requestMessages.add(
+          ChatMessage(
+            role: 'user',
+            content: _resumeNoteFor(task),
+            timestamp: DateTime.now(),
+          ),
+        );
       }
 
       statusMessage.value = 'Connecting to ${profile.name}…';
@@ -544,8 +631,67 @@ class AssistantController extends GetxController {
         isLoading.value = false;
         statusMessage.value = '';
         streamingText.value = '';
+        // Persist before returning: a stopped task must already be
+        // resumable when sendMessage/resumeTask returns, not only
+        // after a background write lands.
+        await _persistTask();
+        unawaited(_foregroundService.stop());
       }
     }
+  }
+
+  /// Context note appended when a task resumes (Batch 5): where it
+  /// stopped, what is done, and the last few tool results — so the
+  /// model continues instead of restarting the work.
+  String _resumeNoteFor(AgentTask task) {
+    final buffer = StringBuffer()
+      ..writeln(
+        '[Resumed task — continue from where it stopped, do not restart.]',
+      )
+      ..writeln(
+        'Task "${task.title}": round ${task.roundsUsed}/${task.maxRounds}, '
+        '${task.toolCallsUsed}/${task.maxToolCalls} tool calls used.',
+      );
+    if (task.todos.isNotEmpty) {
+      buffer.writeln('Todo list:');
+      for (final step in task.todos) {
+        buffer.writeln('- [${step.status.name}] ${step.title}');
+      }
+    }
+    if (task.summary != null && task.summary!.isNotEmpty) {
+      buffer.writeln('Previous summary: ${task.summary}');
+    }
+    final recent = toolCallRecords.length > 5
+        ? toolCallRecords.sublist(toolCallRecords.length - 5)
+        : toolCallRecords;
+    if (recent.isNotEmpty) {
+      buffer.writeln('Last tool calls:');
+      for (final record in recent) {
+        buffer.writeln(
+          '- ${record.toolName} (${record.status.name}): ${record.resultSummary}',
+        );
+      }
+    }
+    return buffer.toString();
+  }
+
+  /// Continues a paused task from the round it stopped at (Batch 5 —
+  /// desain D8/D9). No-op when there is no resumable task or the
+  /// agent is already running.
+  Future<void> resumeTask() async {
+    final task = activeTask.value;
+    if (task == null || isLoading.value) return;
+    if (task.status != TaskStatus.paused &&
+        task.status != TaskStatus.needsHelp &&
+        task.status != TaskStatus.cancelled) {
+      return;
+    }
+    if (pendingPatch.value.isNotEmpty) {
+      lastError.value =
+          'Review or discard the pending patch before continuing the task.';
+      return;
+    }
+    await _runGeneration('', resumeTask: task);
   }
 
   /// Short task title derived from the user's request.
@@ -555,23 +701,34 @@ class AssistantController extends GetxController {
     return '${singleLine.substring(0, 77)}…';
   }
 
-  /// Workspace tool execution for the engine loop (Batch 1). Keeps the
-  /// runtime-output card and status updates that `_runGeneration` used
-  /// to do inline; the engine's own tools never reach this method.
+  /// Workspace tool execution for the engine loop (Batch 1). Records
+  /// every call as a [ToolCallRecord] for the timeline (Batch 5 —
+  /// desain §5/D9) and persists the task after it finishes; the
+  /// engine's own tools (`finish_task`, `update_todo`) never reach
+  /// this method, so they are not timeline records.
   Future<ToolExecutionResult> _executeToolForEngine(ToolCallInfo call) async {
-    if (call.name == 'run_project_command') {
-      String command = '(invalid command arguments)';
-      try {
-        final args = jsonDecode(call.arguments);
-        if (args is Map && args['command'] is String) {
-          command = args['command'] as String;
+    final task = activeTask.value;
+    final stepId = _currentStepId(task);
+    final stopwatch = Stopwatch()..start();
+
+    // The record appears in the timeline as "running" while the tool
+    // executes (desain D10: live tool name, not only finished calls).
+    final record = ToolCallRecord(
+      taskId: task?.id ?? '',
+      stepId: stepId,
+      toolName: call.name,
+      arguments: _decodeToolArguments(call.arguments),
+      resultSummary: 'Running ${call.name}…',
+    );
+    toolCallRecords.add(record);
+    if (task != null) {
+      for (final step in task.todos) {
+        if (step.id == stepId && !step.toolCallIds.contains(record.id)) {
+          step.toolCallIds.add(record.id);
         }
-      } catch (_) {}
-      runtimeOutput.value = '\$ $command\n';
-      _lastRuntimeOutputChannel = '';
+      }
     }
 
-    final task = activeTask.value;
     final result = await _toolService.execute(
       workspaceRoot: _projectController.workspacePath.value,
       call: call,
@@ -583,19 +740,15 @@ class AssistantController extends GetxController {
       requestPermissionApproval: onPermissionApproval,
       checkpointStore: checkpointStore,
       taskId: task?.id,
-      stepId: _currentStepId(task),
+      stepId: stepId,
       onRuntimeOutput: (channel, chunk) {
-        if (_lastRuntimeOutputChannel != channel) {
-          runtimeOutput.value +=
-              '${runtimeOutput.value.isEmpty ? '' : '\n'}[$channel]\n';
-          _lastRuntimeOutputChannel = channel;
-        }
-        runtimeOutput.value += chunk;
-        if (runtimeOutput.value.length > 6000) {
-          runtimeOutput.value = runtimeOutput.value.substring(
-            runtimeOutput.value.length - 6000,
-          );
-        }
+        // Live command output lands on the running record so the
+        // timeline card can show it while it streams.
+        final live = record.resultFull ?? '';
+        final appended = live.isEmpty ? chunk : '$live$chunk';
+        record.resultFull = appended.length > 32768
+            ? appended.substring(appended.length - 32768)
+            : appended;
         final nonEmptyLines = chunk
             .split('\n')
             .where((line) => line.trim().isNotEmpty)
@@ -607,6 +760,25 @@ class AssistantController extends GetxController {
       confirmAndroidAction: onAndroidActionApproval,
     );
 
+    stopwatch.stop();
+    record.durationMs = stopwatch.elapsedMilliseconds;
+    record.resultSummary = result.summary;
+    // The finished result replaces the live stream (the result JSON
+    // already carries the full stdout/stderr for commands).
+    record.resultFull = result.output.length > 65536
+        ? result.output.substring(0, 65536)
+        : result.output;
+    record.backend = _backendFor(call, result);
+    record.status = _cancelToken?.isCancelled == true
+        ? ToolCallStatus.cancelled
+        : !result.isError
+        ? ToolCallStatus.ok
+        : _isDeniedResult(result)
+        ? ToolCallStatus.denied
+        : ToolCallStatus.error;
+    toolCallRecords.refresh();
+    unawaited(_persistTask());
+
     // A successful write tool changed files on disk: refresh the tree,
     // the open editor, and the change history (Batch 2).
     if (ToolRegistry.isWriteTool(call.name) && !result.isError) {
@@ -614,6 +786,47 @@ class AssistantController extends GetxController {
       unawaited(_syncAfterWriteTool(call));
     }
     return result;
+  }
+
+  /// Backend that ran the call (Batch 5 — desain §5): the runtime
+  /// reports it in the result JSON for commands and probes; tools
+  /// that run inside the app report `bundled`.
+  static String _backendFor(ToolCallInfo call, ToolExecutionResult result) {
+    try {
+      final parsed = jsonDecode(result.output);
+      if (parsed is Map && parsed['backend'] is String) {
+        return parsed['backend'] as String;
+      }
+      if (call.name == 'probe_toolchain' && parsed is Map) {
+        final tools = parsed['tools'];
+        if (tools is List && tools.isNotEmpty) {
+          final first = tools.first;
+          if (first is Map && first['backend'] is String) {
+            return first['backend'] as String;
+          }
+        }
+      }
+    } catch (_) {}
+    if (call.name == 'run_project_command') return 'termux';
+    return 'bundled';
+  }
+
+  /// True when the tool was refused by the permission rules or
+  /// declined by the user (Batch 4 messages, surfaced as `denied`
+  /// in the timeline instead of a plain error).
+  static bool _isDeniedResult(ToolExecutionResult result) {
+    return result.summary.startsWith('Declined by user') ||
+        result.summary.startsWith('Blocked by permission rules');
+  }
+
+  /// Decodes tool arguments for the record; falls back to the raw
+  /// JSON string when it is not an object.
+  static Map<String, dynamic> _decodeToolArguments(String rawArguments) {
+    try {
+      final parsed = jsonDecode(rawArguments);
+      if (parsed is Map) return parsed.cast<String, dynamic>();
+    } catch (_) {}
+    return {'raw': rawArguments};
   }
 
   /// Todo step the current tool call belongs to, for checkpoint
@@ -837,6 +1050,7 @@ The user has chosen this provider. The project tree and explicitly selected cont
     final result = await checkpointStore.undoCheckpoint(checkpoint.id, root);
     if (!result.ok) return result.error ?? 'Could not undo this change.';
     changeHistoryRevision.value++;
+    unawaited(_persistTask());
     await _syncAfterUndo(result.undonePaths);
     return null;
   }
@@ -850,6 +1064,7 @@ The user has chosen this provider. The project tree and explicitly selected cont
     final result = await checkpointStore.undoStep(task.id, stepId, root);
     if (!result.ok) return result.error ?? 'Could not undo this step.';
     changeHistoryRevision.value++;
+    unawaited(_persistTask());
     await _syncAfterUndo(result.undonePaths);
     return null;
   }
@@ -863,6 +1078,7 @@ The user has chosen this provider. The project tree and explicitly selected cont
     final result = await checkpointStore.undoTask(task.id, root);
     if (!result.ok) return result.error ?? 'Could not undo the task.';
     changeHistoryRevision.value++;
+    unawaited(_persistTask());
     await _syncAfterUndo(result.undonePaths);
     return null;
   }
@@ -893,6 +1109,7 @@ The user has chosen this provider. The project tree and explicitly selected cont
     cancelRequest();
     messages.clear();
     activeTask.value = null;
+    toolCallRecords.clear();
     checkpointStore.clear();
     pendingPatch.value = '';
     lastSnapshot.value = null;
@@ -903,6 +1120,12 @@ The user has chosen this provider. The project tree and explicitly selected cont
     final ws = _projectController.workspacePath.value;
     if (ws.isNotEmpty) {
       await _chatRepo.delete(ws);
+      // The tasks belong to this conversation's workspace: clearing
+      // the chat also clears the persisted task history, so a fresh
+      // workspace does not resurrect an old paused task.
+      try {
+        await taskStore.deleteAll(ws);
+      } catch (_) {}
     }
   }
 }
