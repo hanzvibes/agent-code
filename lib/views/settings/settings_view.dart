@@ -47,6 +47,48 @@ class SettingsView extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 20),
+            SectionHeader('Agent budget'),
+            AppCard(
+              child: Column(
+                children: [
+                  AppRow(
+                    title: 'Max rounds per task',
+                    subtitle: 'How many model turns one task may use.',
+                    trailing: _BudgetStepper(
+                      value: ctrl.prefs.value.defaultMaxRounds,
+                      step: 5,
+                      decreaseTooltip: 'Decrease max rounds',
+                      increaseTooltip: 'Increase max rounds',
+                      onChanged: (value) => ctrl.setDefaultMaxRounds(value),
+                    ),
+                  ),
+                  Container(
+                    height: 0.5,
+                    color: t.hairline,
+                    margin: const EdgeInsets.only(left: 16),
+                  ),
+                  AppRow(
+                    title: 'Max tool calls per task',
+                    subtitle: 'How many tool calls one task may make.',
+                    trailing: _BudgetStepper(
+                      value: ctrl.prefs.value.defaultMaxToolCalls,
+                      step: 10,
+                      decreaseTooltip: 'Decrease max tool calls',
+                      increaseTooltip: 'Increase max tool calls',
+                      onChanged: (value) => ctrl.setDefaultMaxToolCalls(value),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                    child: Text(
+                      'Applies to new tasks. The agent warns at 80% of the budget and stops when it runs out.',
+                      style: t.caption,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
             SectionHeader('Privacy & Data Handling'),
             AppCard(
               child: Padding(
@@ -122,6 +164,54 @@ class SettingsView extends StatelessWidget {
       MaterialPageRoute(
         builder: (_) => ProviderFormView(profile: profile, ctrl: ctrl),
       ),
+    );
+  }
+}
+
+class _BudgetStepper extends StatelessWidget {
+  final int value;
+  final int step;
+  final String decreaseTooltip;
+  final String increaseTooltip;
+  final ValueChanged<int> onChanged;
+
+  const _BudgetStepper({
+    required this.value,
+    required this.step,
+    required this.decreaseTooltip,
+    required this.increaseTooltip,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final t = AppTokens.of(context);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          tooltip: decreaseTooltip,
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          padding: EdgeInsets.zero,
+          icon: const Icon(Icons.remove_rounded, size: 18),
+          onPressed: () => onChanged(value - step),
+        ),
+        SizedBox(
+          width: 36,
+          child: Text(
+            '$value',
+            style: t.bodyStrong,
+            textAlign: TextAlign.center,
+          ),
+        ),
+        IconButton(
+          tooltip: increaseTooltip,
+          constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+          padding: EdgeInsets.zero,
+          icon: const Icon(Icons.add_rounded, size: 18),
+          onPressed: () => onChanged(value + step),
+        ),
+      ],
     );
   }
 }

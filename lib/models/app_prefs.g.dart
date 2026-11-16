@@ -17,13 +17,15 @@ class AppPrefsAdapter extends TypeAdapter<AppPrefs> {
       lastWorkspacePath: fields[1] as String?,
       isDarkMode: fields[2] as bool? ?? false,
       useSystemTheme: fields[3] as bool? ?? true,
+      defaultMaxRounds: fields[4] as int? ?? 25,
+      defaultMaxToolCalls: fields[5] as int? ?? 60,
     );
   }
 
   @override
   void write(BinaryWriter writer, AppPrefs obj) {
     writer
-      ..writeByte(4)
+      ..writeByte(6)
       ..writeByte(0)
       ..write(obj.activeProfileId)
       ..writeByte(1)
@@ -31,7 +33,11 @@ class AppPrefsAdapter extends TypeAdapter<AppPrefs> {
       ..writeByte(2)
       ..write(obj.isDarkMode)
       ..writeByte(3)
-      ..write(obj.useSystemTheme);
+      ..write(obj.useSystemTheme)
+      ..writeByte(4)
+      ..write(obj.defaultMaxRounds)
+      ..writeByte(5)
+      ..write(obj.defaultMaxToolCalls);
   }
 
   @override

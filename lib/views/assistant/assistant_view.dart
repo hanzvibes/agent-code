@@ -197,6 +197,12 @@ class _AssistantViewState extends State<AssistantView> {
                 t: t,
                 onCancel: ctrl.cancelRequest,
               ),
+            if (ctrl.diffOnlyNotice.value.isNotEmpty)
+              _InfoBanner(
+                notice: ctrl.diffOnlyNotice.value,
+                t: t,
+                onDismiss: ctrl.clearDiffOnlyNotice,
+              ),
             if (ctrl.lastError.value.isNotEmpty)
               _ErrorBanner(
                 error: ctrl.lastError.value,
@@ -1058,6 +1064,52 @@ class _StatusBanner extends StatelessWidget {
             padding: const EdgeInsets.all(8),
             icon: Icon(Icons.stop_rounded, size: 20, color: t.red),
             onPressed: onCancel,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Info banner (diff-only fallback) ───────────────────────────────────
+
+/// Explains why a task ran without tools (Batch 6 — desain D10): the
+/// gateway does not support tool calling, so the agent fell back to
+/// diff proposals. Dismissable; it clears when the next task starts.
+class _InfoBanner extends StatelessWidget {
+  final String notice;
+  final AppTokens t;
+  final VoidCallback onDismiss;
+
+  const _InfoBanner({
+    required this.notice,
+    required this.t,
+    required this.onDismiss,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: t.accent.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: t.accent.withValues(alpha: 0.2)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline_rounded, size: 18, color: t.accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(notice, style: t.caption.copyWith(color: t.text)),
+          ),
+          IconButton(
+            tooltip: 'Dismiss',
+            constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
+            padding: const EdgeInsets.all(8),
+            icon: Icon(Icons.close_rounded, size: 18, color: t.muted),
+            onPressed: onDismiss,
           ),
         ],
       ),

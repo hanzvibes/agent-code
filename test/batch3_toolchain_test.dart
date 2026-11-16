@@ -150,6 +150,7 @@ class ScriptedLlmService extends LlmService {
     double? temperature,
     int? maxTokens,
     void Function(String delta)? onDelta,
+    void Function(int index, String id, String name)? onToolCallName,
   }) async {
     requestCount++;
     if (script.isEmpty) {
