@@ -2,8 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:code_harness/services/tool_registry.dart';
 
 void main() {
-  test('registry defines the read tools, the four write tools and the '
-      'two detection tools', () {
+  test('registry defines the read tools, the four write tools, the '
+      'two detection tools and the scaffold tool', () {
     final names = ToolRegistry.allToolNames;
     expect(
       names,
@@ -17,9 +17,10 @@ void main() {
         'delete_file',
         'detect_project',
         'probe_toolchain',
+        'scaffold_project',
       ]),
     );
-    expect(names.length, 9);
+    expect(names.length, 10);
     expect(ToolRegistry.isWriteTool('write_file'), isTrue);
     expect(ToolRegistry.isWriteTool('edit_file'), isTrue);
     expect(ToolRegistry.isWriteTool('create_file'), isTrue);

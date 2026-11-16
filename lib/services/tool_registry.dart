@@ -167,16 +167,27 @@ class ToolRegistry {
   /// file-system work; `probe_toolchain` runs `<tool> --version` on
   /// the runtime, so it needs the runtime opt-in like
   /// `run_project_command`.
+  ///
+  /// General harness (D11): a workspace can hold several projects
+  /// (root + subfolders). `detect_project` lists them all; both
+  /// detection tools accept an optional `path` to work in one
+  /// sub-project instead of the root.
   static const List<Map<String, dynamic>> detectionToolDefinitions = [
     {
       'type': 'function',
       'function': {
         'name': 'detect_project',
         'description':
-            'Detects the kind of project in the open workspace from marker files at the root (pubspec.yaml = Flutter/Dart, package.json = Node, requirements.txt/pyproject.toml = Python, build.gradle = Gradle/Android, go.mod = Go, Cargo.toml = Rust, composer.json = PHP, none = generic). Returns the type and the marker files found. Call this first when starting work in an unfamiliar project.',
+            'Detects the kind of project in the open workspace from marker files (pubspec.yaml = Flutter/Dart, package.json = Node, requirements.txt/pyproject.toml = Python, build.gradle = Gradle/Android, go.mod = Go, Cargo.toml = Rust, composer.json = PHP, none = generic). Returns the root project type and markers plus a "projects" list of every project in the workspace (root + subfolders). The root type is only a hint about what is open — never a reason to refuse a task whose stack differs; adapt by scaffolding or working in a sub-project instead. Call this first when starting work in an unfamiliar project. With a "path" argument it detects one sub-project instead.',
         'parameters': {
           'type': 'object',
-          'properties': {},
+          'properties': {
+            'path': {
+              'type': 'string',
+              'description':
+                  'Optional workspace-relative subfolder to detect (for example "remotion-app"). Defaults to the workspace root.',
+            },
+          },
           'additionalProperties': false,
         },
       },
@@ -186,7 +197,7 @@ class ToolRegistry {
       'function': {
         'name': 'probe_toolchain',
         'description':
-            'Checks which tools are available on the runtime and their versions, by running "<tool> --version" for each. Without a "tools" argument it probes the tools relevant to the detected project kind plus git and rg. Returns one entry per tool: tool, available, version, backend (bundled). Needs the runtime enabled.',
+            'Checks which tools are available on the runtime and their versions, by running "<tool> --version" for each. Without a "tools" argument it probes the tools relevant to the detected project kind plus git and rg. Returns one entry per tool: tool, available, version, backend (bundled). Needs the runtime enabled. With a "path" argument it probes in that sub-project instead of the workspace root.',
         'parameters': {
           'type': 'object',
           'properties': {
@@ -196,6 +207,11 @@ class ToolRegistry {
               'description':
                   'Optional tool names to probe (for example ["node", "npm"]). Defaults to the tools relevant to the project kind.',
             },
+            'path': {
+              'type': 'string',
+              'description':
+                  'Optional workspace-relative subfolder to probe in (for example "remotion-app"). Defaults to the workspace root.',
+            },
           },
           'additionalProperties': false,
         },
@@ -203,12 +219,52 @@ class ToolRegistry {
     },
   ];
 
-  /// All workspace tools (read + write + detection) in one list for
-  /// the prompt.
+  /// Scaffold tool (general harness, D11): creates a new sub-project
+  /// for the requested stack inside the workspace, so a task whose
+  /// stack differs from the open project can be done instead of
+  /// refused. Offered outside Plan mode, permission-checked like a
+  /// command (installs ask for approval in Agent mode).
+  static const List<Map<String, dynamic>> scaffoldToolDefinitions = [
+    {
+      'type': 'function',
+      'function': {
+        'name': 'scaffold_project',
+        'description':
+            'Creates a new sub-project for the requested stack inside the workspace (for example a Node project in "remotion-app" when the open project is Flutter and the user asks for Remotion). Node runs "npm init -y" and then installs the given packages; Python writes a minimal pyproject.toml and installs the given packages with pip; generic just creates the folder. Returns the new sub-project (path, type, markers) so you can keep working there with working_directory. Never refuse a cross-stack task outright: when the requested framework belongs to a different stack than the open project, scaffold it here instead. Fails when the folder already exists or the stack is unknown.',
+        'parameters': {
+          'type': 'object',
+          'properties': {
+            'stack': {
+              'type': 'string',
+              'description':
+                  'Stack to scaffold: "node", "python", or "generic".',
+            },
+            'path': {
+              'type': 'string',
+              'description':
+                  'Workspace-relative subfolder for the new project (for example "remotion-app"). Must not exist yet.',
+            },
+            'packages': {
+              'type': 'array',
+              'items': {'type': 'string'},
+              'description':
+                  'Optional packages to install after init (for example ["remotion", "@remotion/cli"] for Node, or ["requests"] for Python).',
+            },
+          },
+          'required': ['stack', 'path'],
+          'additionalProperties': false,
+        },
+      },
+    },
+  ];
+
+  /// All workspace tools (read + write + detection + scaffold) in one
+  /// list for the prompt.
   static List<Map<String, dynamic>> get allToolDefinitions => [
     ...readToolDefinitions,
     ...writeToolDefinitions,
     ...detectionToolDefinitions,
+    ...scaffoldToolDefinitions,
   ];
 
   static const Set<String> writeToolNames = {

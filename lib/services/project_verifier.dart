@@ -1,3 +1,5 @@
+import 'package:path/path.dart' as p;
+
 import 'project_detector.dart';
 import 'runtime_service.dart';
 
@@ -87,17 +89,23 @@ class ProjectVerifier {
   /// [changedFiles] are workspace-relative paths the agent changed
   /// (used for `py_compile` / `php -l` targeting). When no files
   /// changed there is nothing to verify and the outcome is skipped.
+  ///
+  /// General harness (D11): [projectRoot] is the absolute directory
+  /// the commands run in (a sub-project); [changedFiles] are then
+  /// relative to that project root. Defaults to [workspaceRoot].
   Future<VerifyOutcome> verify({
     required String workspaceRoot,
     required ProjectType projectType,
     List<String> changedFiles = const [],
     int timeoutSeconds = 120,
+    String? projectRoot,
   }) async {
     if (changedFiles.isEmpty) {
       return const VerifyOutcome(skipped: true, passed: true);
     }
+    final root = projectRoot ?? workspaceRoot;
     final commands = await ProjectDetector.verifyCommands(
-      workspaceRoot,
+      root,
       projectType,
       changedFiles: changedFiles,
     );
@@ -109,6 +117,7 @@ class ProjectVerifier {
       final result = await _runtime.run(
         command: command,
         workspaceRoot: workspaceRoot,
+        workingDirectory: root,
         timeoutSeconds: timeoutSeconds,
       );
       final attempt = VerifyAttempt(
@@ -127,5 +136,75 @@ class ProjectVerifier {
       }
     }
     return VerifyOutcome(skipped: false, passed: true, attempts: attempts);
+  }
+
+  /// Verifies every project the changed files touch (general
+  /// harness, D11): groups [changedFiles] (workspace-relative) by
+  /// the project they belong to — the first path segment when it
+  /// names a detected sub-project, otherwise the root — and runs
+  /// [verify] per affected project with that project's type and its
+  /// own files (relative to the project root).
+  ///
+  /// Returns a skipped outcome when nothing changed or no project
+  /// has verify commands; fails at the first red project, like a
+  /// single verify run. [onProject] is called with each project's
+  /// label and relative path before its commands run (status line).
+  Future<VerifyOutcome> verifyAll({
+    required String workspaceRoot,
+    required List<String> changedFiles,
+    int timeoutSeconds = 120,
+    void Function(String label, String relativePath)? onProject,
+  }) async {
+    if (changedFiles.isEmpty) {
+      return const VerifyOutcome(skipped: true, passed: true);
+    }
+    final projects = await ProjectDetector.detectAll(workspaceRoot);
+    final subRoots = <String>{
+      for (final project in projects)
+        if (project.relativePath != '.') project.relativePath,
+    };
+    final byProject = <String, List<String>>{};
+    for (final file in changedFiles) {
+      final segments = file.replaceAll('\\', '/').split('/');
+      final top = segments.isNotEmpty ? segments.first : '';
+      final owner = subRoots.contains(top) ? top : '.';
+      (byProject[owner] ??= []).add(
+        owner == '.'
+            ? file
+            : segments.skip(1).join('/'),
+      );
+    }
+    final allAttempts = <VerifyAttempt>[];
+    var anyRan = false;
+    for (final entry in byProject.entries) {
+      final project = projects.firstWhere(
+        (candidate) => candidate.relativePath == entry.key,
+        orElse: () => const ProjectInfo(type: ProjectType.generic),
+      );
+      onProject?.call(project.type.label, entry.key);
+      final outcome = await verify(
+        workspaceRoot: workspaceRoot,
+        projectType: project.type,
+        changedFiles: entry.value,
+        timeoutSeconds: timeoutSeconds,
+        projectRoot: entry.key == '.'
+            ? workspaceRoot
+            : p.join(workspaceRoot, entry.key),
+      );
+      allAttempts.addAll(outcome.attempts);
+      if (outcome.attempts.isNotEmpty) anyRan = true;
+      if (!outcome.passed) {
+        return VerifyOutcome(
+          skipped: false,
+          passed: false,
+          attempts: allAttempts,
+        );
+      }
+    }
+    return VerifyOutcome(
+      skipped: !anyRan,
+      passed: true,
+      attempts: allAttempts,
+    );
   }
 }

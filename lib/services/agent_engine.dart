@@ -569,8 +569,10 @@ class AgentEngine {
     }
   }
 
-  /// Verify gate (Batch 3 — desain D4): before the task may finish,
-  /// run the standard verify commands for the detected project kind.
+  /// Verify gate (Batch 3 — desain D4; multi-project since the
+  /// general harness, D11): before the task may finish, run the
+  /// standard verify commands for every project the changed files
+  /// touch, each in its own directory and kind ([ProjectVerifier.verifyAll]).
   ///
   /// Returns `shouldFinish: true` when the task may finish (no
   /// verifier, no workspace, no files changed, or verify green /
@@ -582,7 +584,7 @@ class AgentEngine {
   ///   `needsHelp` and returns the stop result.
   ///
   /// Verify never runs for the wrong kind: the kind comes from
-  /// [ProjectDetector.detect] on the workspace (not a model guess),
+  /// [ProjectDetector] on the workspace (not a model guess),
   /// and kinds without commands (Flutter/Android, generic) skip.
   Future<
     ({bool shouldFinish, AgentRunResult? stopResult, String? errorSummary})
@@ -604,12 +606,13 @@ class AgentEngine {
         changedFiles.isEmpty) {
       return proceed;
     }
-    final info = await ProjectDetector.detect(root);
-    onStatus?.call('Verifying (${info.type.label})…');
-    final outcome = await verifier.verify(
+    final outcome = await verifier.verifyAll(
       workspaceRoot: root,
-      projectType: info.type,
       changedFiles: changedFiles.toList(),
+      onProject: (label, relativePath) => onStatus?.call(
+        'Verifying ($label'
+        '${relativePath == '.' ? '' : ' — $relativePath'})…',
+      ),
     );
     if (outcome.passed) return proceed;
     _verifyAttempts++;
@@ -624,7 +627,7 @@ class AgentEngine {
           task: task,
           stopReason: AgentStopReason.verificationFailed,
           detail:
-              'Verification failed $maxVerifyAttempts times (${info.type.label} project) and the task needs your help. Last error:\n$summary',
+              'Verification failed $maxVerifyAttempts times and the task needs your help. Last error:\n$summary',
           diffOnlyFallback: diffOnlyFallback,
         ),
         errorSummary: null,
