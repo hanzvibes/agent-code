@@ -170,7 +170,6 @@ void main() {
   });
 
   test('update_todo and finish_task flow through the controller', () async {
-    assistantController.enableTools.value = true;
     llmService.scriptResponses.addAll([
       LlmStreamResponse(
         toolCalls: [
@@ -213,7 +212,6 @@ void main() {
   });
 
   test('same tool error three times pauses with needs-help', () async {
-    assistantController.enableTools.value = true;
     // 'nope' is not a permitted tool, so the real executor returns the
     // same error every time.
     llmService.scriptResponses.addAll([
@@ -239,9 +237,7 @@ void main() {
     expect(assistantController.canRetry, isTrue);
   });
 
-  test('write tools run through the engine and record checkpoints',
-      () async {
-    assistantController.enableTools.value = true;
+  test('write tools run through the engine and record checkpoints', () async {
     File('${tempDir.path}/notes.txt').writeAsStringSync('alpha\nbeta\n');
     File('${tempDir.path}/old.txt').writeAsStringSync('stale\n');
     llmService.scriptResponses.addAll([
@@ -316,14 +312,11 @@ void main() {
     );
 
     // The task finished, so the trash was permanently purged (D2).
-    final trashDir = Directory(
-      '${tempDir.path}/.codeharness-trash/${task.id}',
-    );
+    final trashDir = Directory('${tempDir.path}/.codeharness-trash/${task.id}');
     expect(await trashDir.exists(), isFalse);
   });
 
   test('system prompt mentions write tools and undo when enabled', () async {
-    assistantController.enableTools.value = true;
     await assistantController.sendMessage('Do something');
 
     final systemMessage = llmService.lastMessages.firstWhere(
@@ -362,4 +355,70 @@ void main() {
     expect(assistantController.messages.length, 1);
     expect(assistantController.messages.first.role, 'user');
   });
+
+  test(
+    'Plan mode offers only read tools; Agent mode offers write tools',
+    () async {
+      await assistantController.setAgentMode(AgentMode.plan);
+      await assistantController.sendMessage('Inspect this project');
+
+      final planTools = llmService.lastTools
+          .map((tool) => tool['function']['name'] as String)
+          .toSet();
+      expect(planTools, contains('list_project_files'));
+      expect(planTools, contains('detect_project'));
+      expect(planTools, contains('update_todo'));
+      expect(planTools, isNot(contains('write_file')));
+      expect(planTools, isNot(contains('run_project_command')));
+
+      await assistantController.setAgentMode(AgentMode.agent);
+      await assistantController.sendMessage('Fix it');
+
+      final agentTools = llmService.lastTools
+          .map((tool) => tool['function']['name'] as String)
+          .toSet();
+      expect(agentTools, contains('write_file'));
+      expect(agentTools, contains('edit_file'));
+      expect(agentTools, contains('run_project_command'));
+      expect(agentTools, contains('probe_toolchain'));
+    },
+  );
+
+  test('mode is saved per workspace and restored on switch', () async {
+    final firstPath = projectController.workspacePath.value;
+    await assistantController.setAgentMode(AgentMode.plan);
+    expect(assistantController.agentMode.value, AgentMode.plan);
+
+    final secondDir = await Directory.systemTemp.createTemp(
+      'assistant_agent_test_ws2_',
+    );
+    try {
+      await projectController.openWorkspace(secondDir.path);
+      await _waitForMode(assistantController, AgentMode.agent);
+      expect(assistantController.agentMode.value, AgentMode.agent);
+
+      await projectController.openWorkspace(firstPath);
+      await _waitForMode(assistantController, AgentMode.plan);
+      expect(assistantController.agentMode.value, AgentMode.plan);
+    } finally {
+      if (secondDir.existsSync()) {
+        await secondDir.delete(recursive: true);
+      }
+    }
+  });
+}
+
+/// Waits until the controller reports [mode] (workspace switches load
+/// the saved mode asynchronously), failing after 5 seconds.
+Future<void> _waitForMode(
+  AssistantController controller,
+  AgentMode mode,
+) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (controller.agentMode.value != mode) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('mode did not become $mode');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
 }

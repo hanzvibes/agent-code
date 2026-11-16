@@ -18,6 +18,7 @@ import '../services/agents_instructions_service.dart';
 import '../services/assistant_context_builder.dart';
 import '../services/checkpoint_store.dart';
 import '../services/llm_service.dart';
+import '../services/permission_service.dart';
 import '../services/project_verifier.dart';
 import '../services/runtime_service.dart';
 import '../services/tool_registry.dart';
@@ -45,6 +46,12 @@ class AssistantController extends GetxController {
   final CheckpointStore checkpointStore;
   late final AgentEngine _engine;
 
+  /// Mode + permission rules for this workspace (Batch 4 — desain D6).
+  /// The mode is stored per workspace (not reset on workspace change)
+  /// and can be changed from the TaskPanel at any time; the change
+  /// applies to the next tool call.
+  final PermissionService permissionService;
+
   AssistantController({
     required AppController appController,
     required ProjectController projectController,
@@ -55,12 +62,14 @@ class AssistantController extends GetxController {
     CheckpointStore? checkpointStore,
     RuntimeService? runtimeService,
     ProjectVerifier? verifier,
+    PermissionService? permissionService,
   }) : _appController = appController,
        _projectController = projectController,
        _profileRepo = profileRepo,
        _llmService = llmService,
        _chatRepo = chatRepo ?? ChatRepository(),
        _runtimeService = runtimeService ?? RuntimeService(),
+       permissionService = permissionService ?? PermissionService(),
        checkpointStore = checkpointStore ?? CheckpointStore() {
     _toolService =
         toolService ?? WorkspaceToolService(runtimeService: _runtimeService);
@@ -89,19 +98,28 @@ class AssistantController extends GetxController {
   final RxInt changeHistoryRevision = 0.obs;
 
   /// Working mode for new tasks. Default Agent (keputusan Rehan
-  /// 2026-11-16); full mode switching lands in Batch 4.
+  /// 2026-11-16); saved per workspace, so switching workspaces
+  /// restores the mode picked for that workspace (Batch 4).
   final Rx<AgentMode> agentMode = AgentMode.agent.obs;
   int _sessionRevision = 0;
+
+  /// Standing permissions saved for the current workspace
+  /// (always-allowed commands). Loaded on workspace change; null
+  /// until the first load.
+  WorkspacePermissions? _workspacePermissions;
 
   // Generation controls (per-session, in-memory)
   final Rx<double?> sessionTemperature = Rx<double?>(null);
   final Rx<int?> sessionMaxTokens = Rx<int?>(null);
 
-  // Workspace tools opt-in (default OFF)
-  final RxBool enableTools = false.obs;
-  final RxBool enableTermuxRuntime = false.obs;
-  final RxBool enableAndroidActions = false.obs;
   Future<bool> Function(AndroidActionRequest request)? onAndroidActionApproval;
+
+  /// Approval dialog for tool calls that need it (Batch 4 — desain
+  /// D6). Set by the view, following the `onAndroidActionApproval`
+  /// pattern. While the dialog is open the engine loop is paused
+  /// waiting for the answer.
+  Future<PermissionApproval> Function(PermissionApprovalRequest request)?
+  onPermissionApproval;
   String _lastRuntimeOutputChannel = '';
 
   CancelToken? _cancelToken;
@@ -152,6 +170,7 @@ class AssistantController extends GetxController {
       final revision = ++_sessionRevision;
       isRestoringSession.value = true;
       unawaited(_restoreSession(initialPath, revision));
+      unawaited(_loadWorkspacePermissions(initialPath, revision));
     }
     _workspaceWorker = ever<String>(_projectController.workspacePath, (path) {
       if (path == _lastWorkspacePath) return;
@@ -170,14 +189,44 @@ class AssistantController extends GetxController {
       lastError.value = '';
       statusMessage.value = '';
       streamingText.value = '';
-      enableTools.value = false;
-      enableTermuxRuntime.value = false;
-      enableAndroidActions.value = false;
       runtimeOutput.value = '';
       unawaited(_saveThenRestore(oldPath, path, oldMessages, revision));
+      // The mode is saved per workspace (Batch 4): switching
+      // workspaces restores the mode picked for the new workspace
+      // instead of resetting to a default.
+      unawaited(_loadWorkspacePermissions(path, revision));
       // A new workspace has no undo history for the old task's files.
       checkpointStore.clear();
     });
+  }
+
+  /// Loads the saved mode + standing permissions for [path] and
+  /// applies the mode. A failed load keeps the current mode instead
+  /// of blocking the workspace switch.
+  Future<void> _loadWorkspacePermissions(String path, int revision) async {
+    if (path.isEmpty) return;
+    try {
+      final permissions = await permissionService.permissionsFor(path);
+      if (!_isCurrentSession(path, revision)) return;
+      _workspacePermissions = permissions;
+      agentMode.value = permissions.mode;
+    } catch (_) {}
+  }
+
+  /// Switches the working mode (Batch 4): applies to the next tool
+  /// call, including a task that is already running, and is saved for
+  /// this workspace.
+  Future<void> setAgentMode(AgentMode mode) async {
+    agentMode.value = mode;
+    final path = _projectController.workspacePath.value;
+    if (path.isEmpty) return;
+    _workspacePermissions =
+        (_workspacePermissions ?? const WorkspacePermissions()).withMode(mode);
+    try {
+      await permissionService.setMode(path, mode);
+    } catch (_) {
+      // A failed save keeps the in-memory mode for this session.
+    }
   }
 
   Future<void> loadSessionForWorkspace(String path) async {
@@ -393,17 +442,24 @@ class AssistantController extends GetxController {
 
       statusMessage.value = 'Connecting to ${profile.name}…';
 
+      // Tools offered per mode (Batch 4 — desain D6). Read + detection
+      // tools run in every mode; write tools and run_project_command
+      // only outside Plan mode. android_action is offered in every
+      // mode because it always asks the user to approve the exact
+      // payload before Android opens anything.
+      final mode = agentMode.value;
+      final hasWorkspace = _projectController.hasWorkspace;
       final tools = <Map<String, dynamic>>[];
-      if (enableTools.value && _projectController.hasWorkspace) {
-        // Read + write tools from the single registry (Batch 2).
-        tools.addAll(ToolRegistry.allToolDefinitions);
+      if (hasWorkspace) {
+        tools.addAll(ToolRegistry.readToolDefinitions);
+        tools.addAll(ToolRegistry.detectionToolDefinitions);
+        if (mode != AgentMode.plan) {
+          // Write tools from the single registry (Batch 2).
+          tools.addAll(ToolRegistry.writeToolDefinitions);
+          tools.addAll(WorkspaceToolService.termuxToolDefinitions);
+        }
       }
-      if (enableTermuxRuntime.value && _projectController.hasWorkspace) {
-        tools.addAll(WorkspaceToolService.termuxToolDefinitions);
-      }
-      if (enableAndroidActions.value) {
-        tools.addAll(WorkspaceToolService.androidActionToolDefinitions);
-      }
+      tools.addAll(WorkspaceToolService.androidActionToolDefinitions);
       if (tools.isNotEmpty) {
         // Engine-owned tools: plan tracking + explicit task completion.
         tools.addAll(AgentEngine.agentToolDefinitions);
@@ -519,8 +575,12 @@ class AssistantController extends GetxController {
     final result = await _toolService.execute(
       workspaceRoot: _projectController.workspacePath.value,
       call: call,
-      allowTermuxExecution: enableTermuxRuntime.value,
-      allowAndroidActions: enableAndroidActions.value,
+      // Permission gate (Batch 4 — desain D6): the live mode is used,
+      // so a mode switch mid-task applies to the next tool call.
+      mode: agentMode.value,
+      permissionService: permissionService,
+      permissions: _workspacePermissions,
+      requestPermissionApproval: onPermissionApproval,
       checkpointStore: checkpointStore,
       taskId: task?.id,
       stepId: _currentStepId(task),
@@ -612,27 +672,33 @@ class AssistantController extends GetxController {
       selectedAbsolutePaths: selectedContextPaths.toList(),
     );
 
+    // Tool groups offered per mode (Batch 4 — desain D6).
+    final mode = agentMode.value;
     final toolGroups = <String>[];
-    if (enableTools.value && hasWorkspace) {
+    if (hasWorkspace) {
       toolGroups.add(
-        'Project tools: list_project_files, read_project_file, search_project (read-only), plus write_file, edit_file, create_file, delete_file. Edits apply directly and are recorded with their before/after content, so the user can undo any step from the change history. edit_file needs the old text to match exactly once. delete_file moves the file to a trash folder inside the project instead of deleting it; it is only permanently removed when the task finishes.',
+        'Project tools: list_project_files, read_project_file, search_project (read-only).',
       );
+      if (mode == AgentMode.plan) {
+        toolGroups.add(
+          'Plan mode is read-only: you may list, read, search, probe, and detect, but you cannot change files or run commands. Present the work as a todo plan (update_todo) with a summary of what would change, so the user can review it and switch to Agent mode to apply it.',
+        );
+      } else {
+        toolGroups.add(
+          'Write tools: write_file, edit_file, create_file, delete_file. Edits apply directly and are recorded with their before/after content, so the user can undo any step from the change history. edit_file needs the old text to match exactly once. delete_file moves the file to a trash folder inside the project instead of deleting it; it is only permanently removed when the task finishes.',
+        );
+        toolGroups.add(
+          'Termux runtime: run_project_command. Use only for a concrete build, test, Git, Node/npm, Python, or network task. Output streams live and final stdout, stderr, and exit code are returned to you. Commands have Termux permissions, can change files, and are not sandboxed; prefer reviewable unified-diff proposals for source edits when appropriate. In Agent mode the app asks the user to approve destructive, network-out, install, and blocked-list commands before they run; in Auto mode they run without asking (except the blocked list).',
+        );
+      }
     }
-    if (enableTermuxRuntime.value && hasWorkspace) {
-      toolGroups.add(
-        'Termux runtime: run_project_command. Use only for a concrete build, test, Git, Node/npm, Python, or network task. Output streams live and final stdout, stderr, and exit code are returned to you. Commands have Termux permissions, can change files, and are not sandboxed; prefer reviewable unified-diff proposals for source edits when appropriate.',
-      );
-    }
-    if (enableAndroidActions.value) {
-      toolGroups.add(
-        'Android actions: android_action with copy_text, share_text, or open_link. Only call when the user asked for that phone action; the app will show approval for the exact content or link before it happens. Do not share project/private data without explicit user intent.',
-      );
-    }
-    final toolsInstruction = toolGroups.isEmpty
-        ? ''
-        : '\n\nEnabled tool groups (choose only the smallest relevant group):\n- ${toolGroups.join('\n- ')}';
+    toolGroups.add(
+      'Android actions: android_action with copy_text, share_text, or open_link. Only call when the user asked for that phone action; the app will show approval for the exact content or link before it happens. Do not share project/private data without explicit user intent.',
+    );
+    final toolsInstruction =
+        '\n\nEnabled tool groups (choose only the smallest relevant group):\n- ${toolGroups.join('\n- ')}';
 
-    final executionPolicy = enableTermuxRuntime.value && hasWorkspace
+    final executionPolicy = mode != AgentMode.plan && hasWorkspace
         ? '''
 
 Execution-first policy: The user expects you to perform concrete development tasks, not explain how to do them. When the Termux tool is enabled, use it for requested installs, builds, tests, and runs; do not substitute a tutorial or commands for the user to copy. For an install request, inspect the workspace and runtime, identify only missing prerequisites relevant to the task, install those through Termux's package manager (for example, Node.js for Remotion/npm tasks; install Python only if the task needs it), install the requested dependency in the open project with its existing package manager, then run or verify the requested task and continue from actual output. The user's request authorizes routine toolchain and project-package installation for that task; do not ask for separate confirmation for each routine command. Ask first only for destructive or high-impact actions (such as broad deletion, overwriting/recreating existing work, or changes outside the project) or sending private data outside the device. Never claim success without command output. Each command is bounded to 120 seconds; split longer work into short calls, inspect results, and stay within the task budget (25 rounds and 60 tool calls per task). If runtime setup, permissions, or workspace visibility block execution, state the exact blocker instead of giving a manual installation tutorial.'''
@@ -640,14 +706,12 @@ Execution-first policy: The user expects you to perform concrete development tas
 
     // Agent workflow (Batch 1, desain D3): plan first, work one step at
     // a time, verify each step, and never guess when reading is possible.
-    final toolsEnabled =
-        (enableTools.value ||
-            enableTermuxRuntime.value ||
-            enableAndroidActions.value) &&
-        hasWorkspace;
+    // Tools are always offered now (at minimum android_action + the
+    // engine tools), so the plan/finish instruction is unconditional.
+    final toolsEnabled = mode != AgentMode.plan && hasWorkspace;
     final agentWorkflow = '''
 
-Agent workflow: plan first (a short todo list), work one step at a time, verify each step before moving on, then continue. If you are unsure about something, read the relevant file first — never guess. Never claim a command, test, or build ran unless a tool result confirms it.${toolsEnabled ? ' When tools are available, start by recording the plan with the update_todo tool, keep it current as steps finish, and call finish_task with a short summary when the work is done.' : ''}''';
+Agent workflow: plan first (a short todo list), work one step at a time, verify each step before moving on, then continue. If you are unsure about something, read the relevant file first — never guess. Never claim a command, test, or build ran unless a tool result confirms it. When tools are available, start by recording the plan with the update_todo tool, keep it current as steps finish, and call finish_task with a short summary when the work is done.''';
 
     // How edits reach disk: with tools, the write tools apply changes
     // directly (each one checkpointed, undoable from the history). The
@@ -659,6 +723,8 @@ Agent workflow: plan first (a short todo list), work one step at a time, verify 
               'Never rename files, use absolute paths, or use `..` path segments. Delete files only with the delete_file tool (it moves them to trash, where they can be restored). '
               'You may add a new file only when the user explicitly requests it. '
               'Every change you make is recorded so the user can undo it per step or for the whole task.'
+        : hasWorkspace
+        ? 'Plan mode is read-only: do not propose a diff and do not change files. Present the plan as a short todo list and a summary of what would change, so the user can approve it and switch to Agent mode to apply it.'
         : 'When proposing edits, return a short explanation followed by exactly one fenced unified diff using `--- a/relative/path`, `+++ b/relative/path`, and valid `@@` hunks. '
               'Edits may target only existing files included in the context below or read via tools. Do not edit a file just because it appears in the project tree. '
               'Never delete or rename files, use absolute paths, or use `..` path segments. '
@@ -768,10 +834,7 @@ The user has chosen this provider. The project tree and explicitly selected cont
   Future<String?> undoCheckpoint(Checkpoint checkpoint) async {
     final root = _projectController.workspacePath.value;
     if (root.isEmpty) return 'No project folder is open.';
-    final result = await checkpointStore.undoCheckpoint(
-      checkpoint.id,
-      root,
-    );
+    final result = await checkpointStore.undoCheckpoint(checkpoint.id, root);
     if (!result.ok) return result.error ?? 'Could not undo this change.';
     changeHistoryRevision.value++;
     await _syncAfterUndo(result.undonePaths);

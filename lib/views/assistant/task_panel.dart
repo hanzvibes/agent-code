@@ -19,6 +19,15 @@ class TaskPanel extends StatelessWidget {
   final int changeCount;
   final VoidCallback? onViewChanges;
 
+  /// Live mode (Batch 4): may differ from [task].mode when the user
+  /// switches mid-task — the switch applies to the next step. Null
+  /// means "show the task's mode".
+  final AgentMode? mode;
+
+  /// Called when the user picks another mode. When null, the mode is
+  /// shown as a tag only (no switcher).
+  final ValueChanged<AgentMode>? onModeChanged;
+
   const TaskPanel({
     super.key,
     required this.task,
@@ -26,6 +35,8 @@ class TaskPanel extends StatelessWidget {
     required this.onStop,
     this.changeCount = 0,
     this.onViewChanges,
+    this.mode,
+    this.onModeChanged,
   });
 
   static String statusLabel(TaskStatus status) => switch (status) {
@@ -37,12 +48,23 @@ class TaskPanel extends StatelessWidget {
     TaskStatus.cancelled => 'Dibatalkan',
   };
 
+  /// One-line explanation of what the mode allows (Batch 4, D6).
+  static String modeHint(AgentMode mode) => switch (mode) {
+    AgentMode.plan =>
+      'Plan — hanya baca. Agent membuat rencana; tidak ada file diubah atau perintah dijalankan.',
+    AgentMode.agent =>
+      'Agent — baca, tulis, dan perintah aman jalan otomatis; yang berisiko minta persetujuan dulu.',
+    AgentMode.auto =>
+      'Auto — semua jalan otomatis kecuali daftar larang. Hanya untuk workspace tepercaya.',
+  };
+
   @override
   Widget build(BuildContext context) {
     final t = AppTokens.of(context);
     final done = task.doneTodoCount;
     final total = task.totalTodoCount;
     final progress = total == 0 ? 0.0 : done / total;
+    final effectiveMode = mode ?? task.mode;
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -72,7 +94,8 @@ class TaskPanel extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              AppTag(task.mode.label, color: t.accent),
+              if (onModeChanged == null)
+                AppTag(effectiveMode.label, color: t.accent),
               if (isRunning) ...[
                 const SizedBox(width: 8),
                 OutlinedButton.icon(
@@ -90,6 +113,29 @@ class TaskPanel extends StatelessWidget {
               ],
             ],
           ),
+          if (onModeChanged != null) ...[
+            const SizedBox(height: 10),
+            SegmentedButton<AgentMode>(
+              segments: const [
+                ButtonSegment(value: AgentMode.plan, label: Text('Plan')),
+                ButtonSegment(value: AgentMode.agent, label: Text('Agent')),
+                ButtonSegment(value: AgentMode.auto, label: Text('Auto')),
+              ],
+              selected: {effectiveMode},
+              onSelectionChanged: (selection) =>
+                  onModeChanged!(selection.single),
+              showSelectedIcon: false,
+              style: ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              modeHint(effectiveMode),
+              style: t.small.copyWith(color: t.muted),
+            ),
+          ],
           const SizedBox(height: 8),
           if (total > 0) ...[
             Row(

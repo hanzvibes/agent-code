@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:code_harness/models/agent_task.dart';
 import 'package:code_harness/services/android_native_action_service.dart';
 import 'package:code_harness/services/termux_runtime_service.dart';
 import 'package:code_harness/services/workspace_tool_service.dart';
@@ -102,24 +103,25 @@ void main() {
       if (tempDir.existsSync()) await tempDir.delete(recursive: true);
     });
 
-    test('rejects commands unless the runtime is opted in', () async {
+    test('Plan mode denies commands before contacting Termux', () async {
       final result = await service.execute(
         workspaceRoot: tempDir.path,
+        mode: AgentMode.plan,
         call: const ToolCallInfo(
-          id: 'termux-off',
+          id: 'termux-plan',
           name: 'run_project_command',
           arguments: '{"command":"python --version"}',
         ),
       );
 
-      expect(result.output, contains('not enabled'));
+      expect(result.output, contains('Plan mode is read-only'));
       expect(termux.calls, 0);
     });
 
     test('rejects app-private workspaces before contacting Termux', () async {
       final result = await service.execute(
         workspaceRoot: tempDir.path,
-        allowTermuxExecution: true,
+        mode: AgentMode.agent,
         call: const ToolCallInfo(
           id: 'private-root',
           name: 'run_project_command',
@@ -155,23 +157,21 @@ void main() {
       service = WorkspaceToolService(androidActions: actions);
     });
 
-    test('requires the Android action group to be enabled', () async {
-      var approvalAsked = false;
+    test('android_action always needs approval, in every mode', () async {
+      // No approval callback: even in Auto mode the action is refused
+      // before Android is touched.
       final result = await service.execute(
         workspaceRoot: '',
+        mode: AgentMode.auto,
         call: const ToolCallInfo(
-          id: 'android-off',
+          id: 'android-no-confirm',
           name: 'android_action',
           arguments: '{"action":"copy_text","text":"hello"}',
         ),
-        confirmAndroidAction: (_) async {
-          approvalAsked = true;
-          return true;
-        },
       );
 
-      expect(result.output, contains('not enabled'));
-      expect(approvalAsked, isFalse);
+      expect(result.isError, isTrue);
+      expect(result.output, contains('declined'));
       expect(actions.copied, isNull);
     });
 
@@ -181,7 +181,6 @@ void main() {
         AndroidActionRequest? shown;
         final result = await service.execute(
           workspaceRoot: '',
-          allowAndroidActions: true,
           call: const ToolCallInfo(
             id: 'copy-denied',
             name: 'android_action',
@@ -203,7 +202,6 @@ void main() {
       AndroidActionRequest? shown;
       final result = await service.execute(
         workspaceRoot: '',
-        allowAndroidActions: true,
         call: const ToolCallInfo(
           id: 'share-ok',
           name: 'android_action',
@@ -227,7 +225,6 @@ void main() {
         var approvalAsked = false;
         final result = await service.execute(
           workspaceRoot: '',
-          allowAndroidActions: true,
           call: const ToolCallInfo(
             id: 'unsafe-link',
             name: 'android_action',

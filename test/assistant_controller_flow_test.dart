@@ -296,8 +296,6 @@ void main() {
   test(
     'multi-turn tool execution caps rounds at 3 and does not save tool messages to chat history',
     () async {
-      assistantController.enableTools.value = true;
-
       // Script 2 tool rounds then final response
       llmService.scriptResponses.addAll([
         const LlmStreamResponse(
@@ -332,9 +330,7 @@ void main() {
     },
   );
 
-  test('Termux-enabled install requests are execution-first', () async {
-    assistantController.enableTermuxRuntime.value = true;
-
+  test('Agent-mode install requests are execution-first', () async {
     await assistantController.sendMessage('Install Remotion in this project');
 
     expect(
