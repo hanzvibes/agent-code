@@ -651,7 +651,8 @@ void main() {
       }
     });
 
-    test('probe_toolchain needs the runtime enabled', () async {
+    test('probe_toolchain runs without a runtime opt-in (read-only)',
+        () async {
       final dir = await _tempProject({'package.json': '{}'});
       try {
         final service = WorkspaceToolService(
@@ -668,8 +669,11 @@ void main() {
             arguments: '{}',
           ),
         );
-        expect(result.isError, isTrue);
-        expect(result.output, contains('runtime enabled'));
+        // Probing is read-only (Batch 4 — desain D6): it runs in every
+        // mode, including Plan, with no runtime opt-in.
+        expect(result.isError, isFalse);
+        final decoded = jsonDecode(result.output) as Map<String, dynamic>;
+        expect(decoded['project_type'], 'node');
       } finally {
         await dir.delete(recursive: true);
       }
@@ -691,7 +695,6 @@ void main() {
         );
         final result = await service.execute(
           workspaceRoot: dir.path,
-          allowTermuxExecution: true,
           call: const ToolCallInfo(
             id: 'p1',
             name: 'probe_toolchain',
@@ -734,7 +737,6 @@ void main() {
         );
         final result = await service.execute(
           workspaceRoot: dir.path,
-          allowTermuxExecution: true,
           call: const ToolCallInfo(
             id: 'r1',
             name: 'run_project_command',

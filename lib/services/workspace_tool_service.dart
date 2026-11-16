@@ -2,9 +2,11 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
 
+import '../models/agent_task.dart';
 import '../models/checkpoint.dart';
 import 'android_native_action_service.dart';
 import 'checkpoint_store.dart';
+import 'permission_service.dart';
 import 'project_detector.dart';
 import 'runtime_service.dart';
 import 'search_service.dart';
@@ -175,11 +177,24 @@ class WorkspaceToolService {
   /// undone later (Batch 2 — desain D2). Without them the write is
   /// refused instead of running unrecorded. [stepId] is the active
   /// todo step the change belongs to (`'unplanned'` when unknown).
+  ///
+  /// Permission gate (Batch 4 — desain D6): when [permissionService]
+  /// is given, every call is checked against [mode] first. A denied
+  /// call returns a clear error for the model; a call that needs
+  /// approval pauses for [requestPermissionApproval] (the loop waits
+  /// for the user's answer) — except `android_action`, which shows
+  /// its own existing approval sheet via [confirmAndroidAction].
+  /// [permissions] supplies the workspace's standing always-allow
+  /// list; when [permissionService] is null a fresh service with no
+  /// stored permissions is used, so the pattern rules still apply.
   Future<ToolExecutionResult> execute({
     required String workspaceRoot,
     required ToolCallInfo call,
-    bool allowTermuxExecution = false,
-    bool allowAndroidActions = false,
+    AgentMode mode = AgentMode.agent,
+    PermissionService? permissionService,
+    WorkspacePermissions? permissions,
+    Future<PermissionApproval> Function(PermissionApprovalRequest request)?
+    requestPermissionApproval,
     CheckpointStore? checkpointStore,
     String? taskId,
     String? stepId,
@@ -197,6 +212,53 @@ class WorkspaceToolService {
         summary: 'No workspace open',
         isError: true,
       );
+    }
+
+    final permission = permissionService ?? PermissionService();
+    final check = permission.checkToolCall(
+      mode: mode,
+      toolName: name,
+      args: _decodeArgs(call) ?? const {},
+      workspaceRoot: workspaceRoot,
+      permissions: permissions,
+    );
+    if (check.isDenied) {
+      return _toolError(
+        call,
+        check.reason,
+        'Blocked by permission rules ($name)',
+      );
+    }
+    if (check.needsApproval && name != 'android_action') {
+      // The loop pauses here until the user answers; a denial is
+      // reported back to the model as a refused tool result.
+      final request = check.approvalRequest;
+      if (request == null || requestPermissionApproval == null) {
+        return _toolError(
+          call,
+          'This action needs your approval, but no approval prompt is available: ${check.reason}',
+          'Approval unavailable ($name)',
+        );
+      }
+      final approval = await requestPermissionApproval(request);
+      if (approval == PermissionApproval.deny) {
+        return _toolError(
+          call,
+          'You declined this action: ${check.reason}',
+          'Declined by user ($name)',
+        );
+      }
+      if (approval == PermissionApproval.allowAlways) {
+        final command = _commandFromArgs(call);
+        if (command != null) {
+          try {
+            await permission.allowCommandAlways(workspaceRoot, command);
+          } catch (_) {
+            // A failed persist must not block the approved run; the
+            // approval still counts for this one call.
+          }
+        }
+      }
     }
 
     switch (name) {
@@ -241,35 +303,20 @@ class WorkspaceToolService {
       case 'detect_project':
         return _executeDetectProject(workspaceRoot, callId);
       case 'probe_toolchain':
-        if (!allowTermuxExecution) {
-          return _toolError(
-            call,
-            'Toolchain probing needs the runtime enabled for this session.',
-            'Blocked toolchain probe (not enabled)',
-          );
-        }
+        // Read-only (Batch 4 — desain D6): probing runs in every
+        // mode, no runtime opt-in needed.
         return _executeProbeToolchain(workspaceRoot, call);
       case 'run_project_command':
-        if (!allowTermuxExecution) {
-          return _toolError(
-            call,
-            'Termux execution is not enabled for this session.',
-            'Blocked Termux command (not enabled)',
-          );
-        }
+        // Permission-checked above (Batch 4): Plan denies it, Agent
+        // asks for dangerous commands, Auto runs them.
         return _executeTermuxCommand(
           workspaceRoot,
           call,
           onRuntimeOutput: onRuntimeOutput,
         );
       case 'android_action':
-        if (!allowAndroidActions) {
-          return _toolError(
-            call,
-            'Android actions are not enabled for this session.',
-            'Blocked Android action (not enabled)',
-          );
-        }
+        // Permission-checked above (always needs approval); the exact
+        // payload is confirmed through the existing approval sheet.
         return _executeAndroidAction(
           call,
           confirmAndroidAction: confirmAndroidAction,
@@ -848,17 +895,16 @@ class WorkspaceToolService {
     final message = relativePath == null || relativePath.isEmpty
         ? 'Missing or invalid "path" parameter.'
         : relativePath.replaceAll('\\', '/').split('/').first ==
-                  CheckpointStore.trashDirName
-            ? 'Writing inside the ${CheckpointStore.trashDirName} folder is not allowed.'
-            : 'Unsafe path "$relativePath": $fallback';
+              CheckpointStore.trashDirName
+        ? 'Writing inside the ${CheckpointStore.trashDirName} folder is not allowed.'
+        : 'Unsafe path "$relativePath": $fallback';
     return _toolError(call, message, 'Blocked unsafe path');
   }
 
   /// Reads the current text of an existing file, or null when it does
   /// not exist. Returns a [_toolError] result (via [onError]) when the
   /// existing file cannot be safely read as text.
-  Future<({String? before, ToolExecutionResult? error})>
-  _readExistingText(
+  Future<({String? before, ToolExecutionResult? error})> _readExistingText(
     ToolCallInfo call,
     String absolutePath,
     String relativePath,
@@ -948,12 +994,21 @@ class WorkspaceToolService {
       final parsed = jsonDecode(call.arguments);
       if (parsed is Map<String, dynamic>) return parsed;
       if (parsed is Map) {
-        return parsed.map(
-          (key, value) => MapEntry(key.toString(), value),
-        );
+        return parsed.map((key, value) => MapEntry(key.toString(), value));
       }
     } catch (_) {}
     return null;
+  }
+
+  /// The `command` argument of a `run_project_command` call, or null
+  /// for other tools. Used to store a standing "always allow" choice
+  /// for exactly this command.
+  String? _commandFromArgs(ToolCallInfo call) {
+    if (call.name != 'run_project_command') return null;
+    final args = _decodeArgs(call);
+    final command = args?['command'];
+    if (command is! String || command.trim().isEmpty) return null;
+    return command;
   }
 
   String? _stringArg(Map<String, dynamic> args, String name) {
@@ -994,10 +1049,7 @@ class WorkspaceToolService {
         'use a workspace-relative path without ".." or a leading "/".',
       );
     }
-    final contentError = _validateTextContent(
-      content,
-      resolved.relativePath,
-    );
+    final contentError = _validateTextContent(content, resolved.relativePath);
     if (contentError != null) {
       return _toolError(call, contentError, 'Invalid content');
     }
@@ -1118,7 +1170,7 @@ class WorkspaceToolService {
         return _toolError(
           call,
           'No occurrence of the given text was found in ${resolved.relativePath}. '
-          'Read the file again and copy the exact text, including indentation.',
+              'Read the file again and copy the exact text, including indentation.',
           'Text not found in ${resolved.relativePath}',
         );
       }
@@ -1126,8 +1178,8 @@ class WorkspaceToolService {
         return _toolError(
           call,
           'The given text matches $matches times in ${resolved.relativePath}. '
-          'Include more surrounding context so it matches exactly once — '
-          'never guess which occurrence to change.',
+              'Include more surrounding context so it matches exactly once — '
+              'never guess which occurrence to change.',
           'Ambiguous edit in ${resolved.relativePath}',
         );
       }
@@ -1197,10 +1249,7 @@ class WorkspaceToolService {
         'use a workspace-relative path without ".." or a leading "/".',
       );
     }
-    final contentError = _validateTextContent(
-      content,
-      resolved.relativePath,
-    );
+    final contentError = _validateTextContent(content, resolved.relativePath);
     if (contentError != null) {
       return _toolError(call, contentError, 'Invalid content');
     }
@@ -1215,7 +1264,7 @@ class WorkspaceToolService {
         return _toolError(
           call,
           'File already exists: ${resolved.relativePath}. '
-          'Use edit_file or write_file to change it.',
+              'Use edit_file or write_file to change it.',
           'File already exists (${resolved.relativePath})',
         );
       }
@@ -1273,12 +1322,15 @@ class WorkspaceToolService {
       );
     }
     try {
-      final (exists: exists, before: before, error: readError) =
-          await _readDeleteBefore(
-            call,
-            resolved.absolutePath,
-            resolved.relativePath,
-          );
+      final (
+        exists: exists,
+        before: before,
+        error: readError,
+      ) = await _readDeleteBefore(
+        call,
+        resolved.absolutePath,
+        resolved.relativePath,
+      );
       if (readError != null) return readError;
       if (!exists) {
         return _toolError(

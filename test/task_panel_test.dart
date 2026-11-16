@@ -11,6 +11,8 @@ Future<void> _pumpPanel(
   VoidCallback? onStop,
   int changeCount = 0,
   VoidCallback? onViewChanges,
+  AgentMode? mode,
+  ValueChanged<AgentMode>? onModeChanged,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -22,6 +24,8 @@ Future<void> _pumpPanel(
           onStop: onStop ?? () {},
           changeCount: changeCount,
           onViewChanges: onViewChanges,
+          mode: mode,
+          onModeChanged: onModeChanged,
         ),
       ),
     ),
@@ -98,8 +102,9 @@ void main() {
     expect(find.text('Dijeda — bisa dilanjutkan'), findsOneWidget);
   });
 
-  testWidgets('shows changes button when the task recorded changes',
-      (tester) async {
+  testWidgets('shows changes button when the task recorded changes', (
+    tester,
+  ) async {
     var opened = false;
     final task = AgentTask(title: 'Task with changes');
 
@@ -117,12 +122,65 @@ void main() {
     expect(opened, isTrue);
   });
 
-  testWidgets('hides changes button when there are no changes',
-      (tester) async {
+  testWidgets('hides changes button when there are no changes', (tester) async {
     final task = AgentTask(title: 'Plain task');
 
     await _pumpPanel(tester, task, isRunning: false);
 
     expect(find.textContaining('change'), findsNothing);
+  });
+
+  testWidgets('mode switcher shows all modes and reports the pick', (
+    tester,
+  ) async {
+    AgentMode? picked;
+    final task = AgentTask(title: 'Task with switcher', mode: AgentMode.agent);
+
+    await _pumpPanel(
+      tester,
+      task,
+      isRunning: false,
+      onModeChanged: (mode) => picked = mode,
+    );
+
+    expect(find.text('Plan'), findsOneWidget);
+    expect(find.text('Agent'), findsOneWidget);
+    expect(find.text('Auto'), findsOneWidget);
+    await tester.tap(find.text('Auto'));
+    await tester.pump();
+
+    expect(picked, AgentMode.auto);
+  });
+
+  testWidgets('mode switcher shows the live mode, not the task mode', (
+    tester,
+  ) async {
+    final task = AgentTask(
+      title: 'Task started in Agent',
+      mode: AgentMode.agent,
+    );
+
+    await _pumpPanel(
+      tester,
+      task,
+      isRunning: false,
+      mode: AgentMode.plan,
+      onModeChanged: (_) {},
+    );
+
+    // The Plan hint is shown; the tag is replaced by the switcher.
+    expect(find.textContaining('Plan — hanya baca'), findsOneWidget);
+  });
+
+  testWidgets('without a switcher the mode is shown as a tag', (tester) async {
+    final task = AgentTask(
+      title: 'Task without switcher',
+      mode: AgentMode.auto,
+    );
+
+    await _pumpPanel(tester, task, isRunning: false);
+
+    expect(find.text('Auto'), findsOneWidget);
+    expect(find.text('Plan'), findsNothing);
   });
 }

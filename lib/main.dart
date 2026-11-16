@@ -14,6 +14,7 @@ import 'repositories/chat_repository.dart';
 import 'repositories/prefs_repository.dart';
 import 'repositories/profile_repository.dart';
 import 'services/llm_service.dart';
+import 'services/permission_service.dart';
 import 'services/workspace_service.dart';
 import 'views/shell.dart';
 
@@ -32,6 +33,7 @@ void main() async {
   await ProfileRepository.openBox();
   await PrefsRepository.openBox();
   await ChatRepository.openBox();
+  await PermissionService.openBox();
 
   // Create sample workspace if first run
   final prefsRepo = PrefsRepository();

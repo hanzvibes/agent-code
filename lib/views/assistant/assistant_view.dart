@@ -10,7 +10,9 @@ import '../../controllers/assistant_controller.dart';
 import '../../controllers/project_controller.dart';
 import '../../controllers/review_controller.dart';
 import '../../core/ui.dart';
+import '../../models/agent_task.dart';
 import '../../services/android_native_action_service.dart';
+import '../../services/permission_service.dart';
 import '../../models/chat_message.dart';
 import '../../models/file_node.dart';
 import '../../services/termux_runtime_service.dart';
@@ -69,6 +71,8 @@ class _AssistantViewState extends State<AssistantView> {
     final ctrl = Get.find<AssistantController>();
     ctrl.onAndroidActionApproval = (request) =>
         _confirmAndroidAction(context, request);
+    ctrl.onPermissionApproval = (request) =>
+        _confirmPermission(context, request);
     final projCtrl = Get.find<ProjectController>();
 
     return Scaffold(
@@ -121,6 +125,8 @@ class _AssistantViewState extends State<AssistantView> {
                 onStop: ctrl.stopAgent,
                 changeCount: ctrl.activeTaskCheckpoints.length,
                 onViewChanges: () => _openChangeHistory(context, ctrl),
+                mode: ctrl.agentMode.value,
+                onModeChanged: (mode) => ctrl.setAgentMode(mode),
               ),
             Expanded(
               child: ctrl.isRestoringSession.value
@@ -281,6 +287,81 @@ class _AssistantViewState extends State<AssistantView> {
         true;
   }
 
+  /// Approval sheet for a tool call that needs it (Batch 4 — desain
+  /// D6). Follows the `_confirmAndroidAction` pattern (bottom sheet
+  /// with the exact thing that will run), plus the "always allow this
+  /// command in this workspace" choice. While this sheet is open the
+  /// agent loop is paused waiting for the answer.
+  Future<PermissionApproval> _confirmPermission(
+    BuildContext context,
+    PermissionApprovalRequest request,
+  ) async {
+    if (!context.mounted) return PermissionApproval.deny;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (sheetContext) {
+        final t = AppTokens.of(sheetContext);
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: t.sheetHandle,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(request.title, style: t.title),
+              const SizedBox(height: 6),
+              Text(request.description, style: t.caption),
+              const SizedBox(height: 12),
+              AppCard(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 180),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      request.preview,
+                      style: t.small.copyWith(fontFamily: 'monospace'),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              PrimaryButton(
+                label: 'Allow once',
+                onPressed: () => Navigator.of(sheetContext).pop('once'),
+              ),
+              const SizedBox(height: 8),
+              OutlinedButton(
+                onPressed: () => Navigator.of(sheetContext).pop('always'),
+                child: const Text('Always allow in this workspace'),
+              ),
+              const SizedBox(height: 4),
+              TextButton(
+                onPressed: () => Navigator.of(sheetContext).pop('deny'),
+                child: const Text('Deny'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    return switch (choice) {
+      'once' => PermissionApproval.allowOnce,
+      'always' => PermissionApproval.allowAlways,
+      _ => PermissionApproval.deny,
+    };
+  }
+
   void _openSettingsSheet(BuildContext context, AssistantController ctrl) {
     showModalBottomSheet<void>(
       context: context,
@@ -299,11 +380,9 @@ class _AssistantViewState extends State<AssistantView> {
   ) async {
     if (ctrl.activeTask.value == null) return;
     if (!context.mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ChangeHistoryView(ctrl: ctrl),
-      ),
-    );
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute(builder: (_) => ChangeHistoryView(ctrl: ctrl)));
   }
 }
 
@@ -362,10 +441,7 @@ class _ContextBanner extends StatelessWidget {
       final total = ctrl.contextFileCount;
       final extra = ctrl.selectedExtraContextCount;
       final snapshot = ctrl.lastSnapshot.value;
-      final toolsOn =
-          ctrl.enableTools.value ||
-          ctrl.enableTermuxRuntime.value ||
-          ctrl.enableAndroidActions.value;
+      final modeLabel = ctrl.agentMode.value.label;
       final lastRequestWasTruncated =
           snapshot != null &&
           p.equals(snapshot.workspaceRoot, projCtrl.workspacePath.value) &&
@@ -380,10 +456,10 @@ class _ContextBanner extends StatelessWidget {
             ? '$extra selected'
             : 'open + $extra selected';
         bannerText =
-            'Project tree + $total context file${total == 1 ? '' : 's'} ($included) sent directly to provider.${toolsOn ? ' Agent tools ON.' : ''} Context leaves device.';
+            'Project tree + $total context file${total == 1 ? '' : 's'} ($included) sent directly to provider. Mode $modeLabel. Context leaves device.';
       } else {
         bannerText =
-            'Project tree and chat go to provider.${toolsOn ? ' Agent tools ON.' : ''} Choose files to include source code. Context leaves device.';
+            'Project tree and chat go to provider. Mode $modeLabel. Choose files to include source code. Context leaves device.';
       }
       if (lastRequestWasTruncated) {
         bannerText +=
@@ -1375,9 +1451,7 @@ class _SessionSettingsSheet extends StatefulWidget {
 class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
   late double? _temp;
   late int? _maxTokens;
-  late bool _tools;
-  late bool _termux;
-  late bool _androidActions;
+  late AgentMode _mode;
   final TermuxRuntimeService _termuxRuntime = TermuxRuntimeService();
   TermuxRuntimeStatus? _termuxStatus;
   bool _loadingTermuxStatus = true;
@@ -1387,9 +1461,7 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
     super.initState();
     _temp = widget.ctrl.sessionTemperature.value;
     _maxTokens = widget.ctrl.sessionMaxTokens.value;
-    _tools = widget.ctrl.enableTools.value;
-    _termux = widget.ctrl.enableTermuxRuntime.value;
-    _androidActions = widget.ctrl.enableAndroidActions.value;
+    _mode = widget.ctrl.agentMode.value;
     _refreshTermuxStatus();
   }
 
@@ -1519,10 +1591,10 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
             ),
           ),
           const SizedBox(height: 16),
-          Text('Generation & Workspace Tools', style: t.title),
+          Text('Generation & Agent Mode', style: t.title),
           const SizedBox(height: 4),
           Text(
-            'Per-session configuration. These options are kept in memory and passed directly to your selected provider gateway.',
+            'Per-workspace configuration. The mode is saved for this workspace and kept when you switch projects.',
             style: t.caption,
           ),
           const SizedBox(height: 20),
@@ -1616,116 +1688,75 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
             icon: Icons.lightbulb_outline_rounded,
           ),
           const SizedBox(height: 20),
-          SectionHeader('Agent Tool Groups'),
+          SectionHeader('Agent Mode'),
           AppCard(
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(
-                    'Inspect project (read-only)',
-                    style: t.bodyStrong,
-                  ),
-                  subtitle: Text(
-                    'A small project group: list files, read files, and search code.',
-                    style: t.caption,
-                  ),
-                  value: _tools,
-                  onChanged: (on) {
-                    setState(() => _tools = on);
-                    widget.ctrl.enableTools.value = on;
+                SegmentedButton<AgentMode>(
+                  segments: const [
+                    ButtonSegment(value: AgentMode.plan, label: Text('Plan')),
+                    ButtonSegment(value: AgentMode.agent, label: Text('Agent')),
+                    ButtonSegment(value: AgentMode.auto, label: Text('Auto')),
+                  ],
+                  selected: {_mode},
+                  onSelectionChanged: (selection) {
+                    final next = selection.single;
+                    setState(() => _mode = next);
+                    widget.ctrl.setAgentMode(next);
                   },
+                  showSelectedIcon: false,
                 ),
-                if (_tools)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Text(
-                      'Only these enabled inspection tools are exposed to your provider. They read workspace files; they cannot write files or run commands.',
-                      style: t.small,
-                    ),
-                  ),
-                Divider(height: 1, color: t.hairline),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text('Run commands with Termux', style: t.bodyStrong),
-                  subtitle: Text(
-                    Get.find<ProjectController>().hasWorkspace
-                        ? 'One runtime tool for builds/tests, Git, Node/npm, and Python.'
-                        : 'Open a project first to enable project commands.',
-                    style: t.caption,
-                  ),
-                  value: _termux,
-                  onChanged: Get.find<ProjectController>().hasWorkspace
-                      ? (on) {
-                          setState(() => _termux = on);
-                          widget.ctrl.enableTermuxRuntime.value = on;
-                        }
-                      : null,
+                const SizedBox(height: 10),
+                Text(TaskPanel.modeHint(_mode), style: t.small),
+                const SizedBox(height: 10),
+                Text(
+                  'Commands the agent runs are checked first: destructive, network-out, install, and blocked-list commands ask for your approval in Agent mode. The blocked list (rm -rf, mkfs, dd, format, writes outside the project, curl | sh, credentials in commands) never runs automatically in any mode.',
+                  style: t.small,
                 ),
-                if (_termux) ...[
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        AppNotice(
-                          'Commands run with Termux permissions and network access; they can modify or delete files directly, outside diff review. Each run is limited to 1–120 seconds, 32 KB of command text, and 16 KB of returned output per stream.',
-                          icon: Icons.warning_amber_rounded,
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _loadingTermuxStatus
-                              ? 'Checking Termux status…'
-                              : _termuxStatus == null
-                              ? 'Termux status is unavailable.'
-                              : !_termuxStatus!.installed
-                              ? 'Termux is not installed.'
-                              : _termuxStatus!.permissionGranted
-                              ? 'Termux found • Android command permission granted'
-                              : 'Termux found • Android command permission still needed',
-                          style: t.small,
-                        ),
-                        TextButton.icon(
-                          onPressed: () => _showTermuxSetup(context),
-                          icon: const Icon(Icons.settings_outlined),
-                          label: const Text('Termux setup & permissions'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-                Divider(height: 1, color: t.hairline),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text('Android actions', style: t.bodyStrong),
-                  subtitle: Text(
-                    'Copy/share text or open a web link through phone-native UI.',
-                    style: t.caption,
-                  ),
-                  value: _androidActions,
-                  onChanged: (on) {
-                    setState(() => _androidActions = on);
-                    widget.ctrl.enableAndroidActions.value = on;
-                  },
-                ),
-                if (_androidActions)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Text(
-                      'Only one Android actions tool is exposed. Every copy, share, or external link first shows an in-app approval with the exact payload. No broad phone permissions are requested.',
-                      style: t.small,
-                    ),
-                  ),
-                Divider(height: 1, color: t.hairline),
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 10),
-                  child: Text(
-                    'Only enabled groups are sent to the model: up to 3 tool rounds and 6 tool calls per turn.',
-                    style: t.small,
-                  ),
+                const Divider(height: 20),
+                Text(
+                  'Android actions (copy/share/open link) always show an in-app approval with the exact payload first, in every mode.',
+                  style: t.small,
                 ),
               ],
             ),
+          ),
+          const SizedBox(height: 20),
+          SectionHeader('Termux Runtime'),
+          AppCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                AppNotice(
+                  'Commands run with Termux permissions and network access; they can modify or delete files directly, outside diff review. Each run is limited to 1–120 seconds, 32 KB of command text, and 16 KB of returned output per stream.',
+                  icon: Icons.warning_amber_rounded,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  _loadingTermuxStatus
+                      ? 'Checking Termux status…'
+                      : _termuxStatus == null
+                      ? 'Termux status is unavailable.'
+                      : !_termuxStatus!.installed
+                      ? 'Termux is not installed.'
+                      : _termuxStatus!.permissionGranted
+                      ? 'Termux found • Android command permission granted'
+                      : 'Termux found • Android command permission still needed',
+                  style: t.small,
+                ),
+                TextButton.icon(
+                  onPressed: () => _showTermuxSetup(context),
+                  icon: const Icon(Icons.settings_outlined),
+                  label: const Text('Termux setup & permissions'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Each task has 25 rounds and 60 tool calls. The mode applies to the next step, including a task that is already running.',
+            style: t.small,
           ),
           const SizedBox(height: 24),
           PrimaryButton(
