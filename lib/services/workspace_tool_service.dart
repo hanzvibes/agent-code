@@ -31,11 +31,16 @@ class ToolExecutionResult {
   final String output;
   final String summary;
 
+  /// True when the tool refused or failed (Batch 1: AgentEngine uses
+  /// this to detect the same error repeating).
+  final bool isError;
+
   const ToolExecutionResult({
     required this.callId,
     required this.toolName,
     required this.output,
     required this.summary,
+    this.isError = false,
   });
 
   Map<String, dynamic> toApiMap() => {
@@ -215,6 +220,7 @@ class WorkspaceToolService {
         toolName: name,
         output: jsonEncode({'error': 'No workspace is currently open.'}),
         summary: 'No workspace open',
+        isError: true,
       );
     }
 
@@ -259,6 +265,7 @@ class WorkspaceToolService {
                 'Tool "$name" is not permitted. Only read-only workspace tools are allowed.',
           }),
           summary: 'Blocked unauthorized tool "$name"',
+          isError: true,
         );
     }
   }
@@ -276,6 +283,7 @@ class WorkspaceToolService {
     toolName: call.name,
     output: jsonEncode({'error': error}),
     summary: summary,
+    isError: true,
   );
 
   Future<ToolExecutionResult> _executeTermuxCommand(
