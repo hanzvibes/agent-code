@@ -17,6 +17,7 @@ import '../../services/termux_runtime_service.dart';
 import '../../services/workspace_service.dart';
 import '../../utils/unified_patch.dart';
 import '../../widgets/markdown_message_view.dart';
+import '../review/change_history_view.dart';
 import '../review/review_view.dart';
 import '../settings/provider_form_view.dart';
 import 'task_panel.dart';
@@ -108,6 +109,8 @@ class _AssistantViewState extends State<AssistantView> {
       ),
       body: Obx(() {
         if (!ctrl.hasProfile) return const _NoProfileState();
+        // Rebuild when the change history changes (write tool / undo).
+        ctrl.changeHistoryRevision.value;
         return Column(
           children: [
             _ContextBanner(projCtrl: projCtrl, ctrl: ctrl),
@@ -116,6 +119,8 @@ class _AssistantViewState extends State<AssistantView> {
                 task: ctrl.activeTask.value!,
                 isRunning: ctrl.isLoading.value,
                 onStop: ctrl.stopAgent,
+                changeCount: ctrl.activeTaskCheckpoints.length,
+                onViewChanges: () => _openChangeHistory(context, ctrl),
               ),
             Expanded(
               child: ctrl.isRestoringSession.value
@@ -282,6 +287,22 @@ class _AssistantViewState extends State<AssistantView> {
       isScrollControlled: true,
       useSafeArea: true,
       builder: (_) => _SessionSettingsSheet(ctrl: ctrl),
+    );
+  }
+
+  /// Opens the change history for the active task (Batch 2): the list
+  /// of agent changes per step with diffs and undo buttons. Review is
+  /// no longer a gate — this is history + undo, not an approval step.
+  Future<void> _openChangeHistory(
+    BuildContext context,
+    AssistantController ctrl,
+  ) async {
+    if (ctrl.activeTask.value == null) return;
+    if (!context.mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ChangeHistoryView(ctrl: ctrl),
+      ),
     );
   }
 }

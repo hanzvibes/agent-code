@@ -9,6 +9,8 @@ Future<void> _pumpPanel(
   AgentTask task, {
   bool isRunning = true,
   VoidCallback? onStop,
+  int changeCount = 0,
+  VoidCallback? onViewChanges,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -18,6 +20,8 @@ Future<void> _pumpPanel(
           task: task,
           isRunning: isRunning,
           onStop: onStop ?? () {},
+          changeCount: changeCount,
+          onViewChanges: onViewChanges,
         ),
       ),
     ),
@@ -92,5 +96,33 @@ void main() {
     await _pumpPanel(tester, task, isRunning: false);
 
     expect(find.text('Dijeda — bisa dilanjutkan'), findsOneWidget);
+  });
+
+  testWidgets('shows changes button when the task recorded changes',
+      (tester) async {
+    var opened = false;
+    final task = AgentTask(title: 'Task with changes');
+
+    await _pumpPanel(
+      tester,
+      task,
+      isRunning: false,
+      changeCount: 2,
+      onViewChanges: () => opened = true,
+    );
+
+    expect(find.text('2 changes'), findsOneWidget);
+    await tester.tap(find.text('2 changes'));
+    await tester.pump();
+    expect(opened, isTrue);
+  });
+
+  testWidgets('hides changes button when there are no changes',
+      (tester) async {
+    final task = AgentTask(title: 'Plain task');
+
+    await _pumpPanel(tester, task, isRunning: false);
+
+    expect(find.textContaining('change'), findsNothing);
   });
 }
