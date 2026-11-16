@@ -239,6 +239,101 @@ void main() {
     expect(assistantController.canRetry, isTrue);
   });
 
+  test('write tools run through the engine and record checkpoints',
+      () async {
+    assistantController.enableTools.value = true;
+    File('${tempDir.path}/notes.txt').writeAsStringSync('alpha\nbeta\n');
+    File('${tempDir.path}/old.txt').writeAsStringSync('stale\n');
+    llmService.scriptResponses.addAll([
+      LlmStreamResponse(
+        toolCalls: [
+          ToolCallInfo(
+            id: 'c1',
+            name: 'update_todo',
+            arguments: jsonEncode({
+              'steps': [
+                {'title': 'Edit the file', 'status': 'active'},
+              ],
+            }),
+          ),
+        ],
+      ),
+      LlmStreamResponse(
+        toolCalls: [
+          ToolCallInfo(
+            id: 'c2',
+            name: 'write_file',
+            arguments: jsonEncode({
+              'path': 'notes.txt',
+              'content': 'alpha\nBETA\n',
+            }),
+          ),
+        ],
+      ),
+      LlmStreamResponse(
+        toolCalls: [
+          ToolCallInfo(
+            id: 'c3',
+            name: 'delete_file',
+            arguments: jsonEncode({'path': 'old.txt'}),
+          ),
+        ],
+      ),
+      LlmStreamResponse(
+        toolCalls: [
+          ToolCallInfo(
+            id: 'c4',
+            name: 'finish_task',
+            arguments: jsonEncode({'summary': 'Edited and cleaned up.'}),
+          ),
+        ],
+      ),
+    ]);
+
+    await assistantController.sendMessage('Fix the notes file');
+
+    final task = assistantController.activeTask.value;
+    expect(task, isNotNull);
+    expect(task!.status, TaskStatus.done);
+    expect(
+      await File('${tempDir.path}/notes.txt').readAsString(),
+      'alpha\nBETA\n',
+    );
+    expect(await File('${tempDir.path}/old.txt').exists(), isFalse);
+
+    // Both writes were checkpointed under this task.
+    final checkpoints = assistantController.activeTaskCheckpoints;
+    expect(checkpoints, hasLength(2));
+    expect(checkpoints.map((cp) => cp.path), ['notes.txt', 'old.txt']);
+    expect(checkpoints.first.before, 'alpha\nbeta\n');
+    expect(checkpoints.first.after, 'alpha\nBETA\n');
+    expect(checkpoints.last.isDelete, isTrue);
+
+    // The model was offered the write tools.
+    expect(
+      llmService.lastTools.map((tool) => tool['function']['name']),
+      containsAll(['write_file', 'edit_file', 'create_file', 'delete_file']),
+    );
+
+    // The task finished, so the trash was permanently purged (D2).
+    final trashDir = Directory(
+      '${tempDir.path}/.codeharness-trash/${task.id}',
+    );
+    expect(await trashDir.exists(), isFalse);
+  });
+
+  test('system prompt mentions write tools and undo when enabled', () async {
+    assistantController.enableTools.value = true;
+    await assistantController.sendMessage('Do something');
+
+    final systemMessage = llmService.lastMessages.firstWhere(
+      (message) => message['role'] == 'system',
+    );
+    final systemPrompt = systemMessage['content'] as String;
+    expect(systemPrompt, contains('write_file'));
+    expect(systemPrompt, contains('undo'));
+  });
+
   test('stopAgent cancels the in-flight run', () async {
     llmService.gate = Completer<void>();
     llmService.scriptResponses.add(

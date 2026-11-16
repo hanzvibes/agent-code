@@ -325,6 +325,24 @@ class ProjectController extends GetxController {
     currentMatchIndex.value = idx >= 0 ? idx + 1 : 1;
   }
 
+  /// Re-reads the open file from disk (used after an agent write tool
+  /// changed it). Skipped when the user has unsaved edits, so their
+  /// in-progress typing is never overwritten.
+  Future<void> refreshOpenFile() async {
+    final file = openFile.value;
+    if (file == null || hasUnsavedChanges) return;
+    try {
+      final content = await WorkspaceService.readFile(file.path);
+      editorContent.value = content;
+      savedContent.value = content;
+      _editorHistory.init(content);
+      _syncUndoRedo();
+      errorMessage.value = '';
+    } catch (error) {
+      errorMessage.value = 'Could not reload this file: $error';
+    }
+  }
+
   Future<void> closeFile() async {
     if (!await _confirmUnsavedChanges()) return;
     openFile.value = null;

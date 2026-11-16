@@ -1,5 +1,7 @@
 import 'package:get/get.dart';
 
+import '../models/checkpoint.dart';
+import '../utils/text_diff.dart';
 import '../utils/unified_patch.dart';
 
 class PatchFile {
@@ -94,6 +96,66 @@ class ReviewController extends GetxController {
       patchFiles[i] = file.copyWith(after: newAfter, hunks: updatedHunks);
     }
     patchFiles.refresh();
+  }
+
+  /// Builds the change-history view of agent checkpoints (Batch 2 —
+  /// desain D2/D9): one [PatchFile] per checkpoint, with hunks computed
+  /// from the before/after contents through [UnifiedPatchParser] so the
+  /// existing diff rendering can be reused. The files are display-only
+  /// history — undo goes through [CheckpointStore], not apply.
+  void loadCheckpoints(List<Checkpoint> checkpoints) {
+    rawPatch.value = '';
+    parseError.value = '';
+    patchFiles.clear();
+
+    final built = <PatchFile>[];
+    for (final cp in checkpoints) {
+      final before = cp.before ?? '';
+      // A delete is shown as "every line removed" (after is empty).
+      final after = cp.isDelete ? '' : (cp.after ?? '');
+      final diff = buildUnifiedDiff(
+        path: cp.path,
+        before: before,
+        after: after,
+        isNewFile: cp.isCreate,
+      );
+      var hunks = const <PatchHunk>[];
+      if (diff.isNotEmpty) {
+        try {
+          final changes = UnifiedPatchParser.apply(diff, {cp.path: before});
+          hunks = changes.first.hunks;
+        } catch (_) {
+          hunks = const [];
+        }
+      } else if (before != after) {
+        // Contents differ only in a trailing newline / line endings,
+        // which a unified diff cannot represent: show a note instead
+        // of an empty diff card.
+        hunks = const [
+          PatchHunk(
+            oldStart: 1,
+            oldCount: 1,
+            newStart: 1,
+            newCount: 1,
+            header: '@@ -1 +1 @@',
+            lines: [
+              '- (content changed: line ending only)',
+              '+ (open the file to see the current content)',
+            ],
+          ),
+        ];
+      }
+      built.add(
+        PatchFile(
+          path: cp.path,
+          before: before,
+          after: after,
+          existedAtPreview: cp.isDelete ? true : cp.before != null,
+          hunks: hunks,
+        ),
+      );
+    }
+    patchFiles.value = built;
   }
 
   void loadPatch(

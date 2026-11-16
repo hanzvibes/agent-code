@@ -2,9 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
 
+import '../models/checkpoint.dart';
 import 'android_native_action_service.dart';
+import 'checkpoint_store.dart';
 import 'search_service.dart';
 import 'termux_runtime_service.dart';
+import 'tool_registry.dart';
 import 'workspace_service.dart';
 
 class ToolCallInfo {
@@ -64,59 +67,10 @@ class WorkspaceToolService {
        _termuxRuntime = termuxRuntime ?? TermuxRuntimeService(),
        _androidActions = androidActions ?? AndroidNativeActionService();
 
-  static const List<Map<String, dynamic>> toolDefinitions = [
-    {
-      'type': 'function',
-      'function': {
-        'name': 'list_project_files',
-        'description':
-            'Lists relative file paths in the workspace (skipping ignored folders).',
-        'parameters': {
-          'type': 'object',
-          'properties': {},
-          'additionalProperties': false,
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'read_project_file',
-        'description':
-            'Reads a workspace-relative file, capped to 512 KB and truncated to 16 KB.',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'path': {
-              'type': 'string',
-              'description': 'Workspace-relative path to read.',
-            },
-          },
-          'required': ['path'],
-          'additionalProperties': false,
-        },
-      },
-    },
-    {
-      'type': 'function',
-      'function': {
-        'name': 'search_project',
-        'description':
-            'Searches for text in workspace files and file paths, returning line numbers and previews.',
-        'parameters': {
-          'type': 'object',
-          'properties': {
-            'query': {
-              'type': 'string',
-              'description': 'Search string to find in workspace.',
-            },
-          },
-          'required': ['query'],
-          'additionalProperties': false,
-        },
-      },
-    },
-  ];
+  /// Read-only workspace tools. The full set (read + write) lives in
+  /// [ToolRegistry]; this alias stays so existing callers keep working.
+  static const List<Map<String, dynamic>> toolDefinitions =
+      ToolRegistry.readToolDefinitions;
 
   static const List<Map<String, dynamic>> termuxToolDefinitions = [
     {
@@ -203,11 +157,22 @@ class WorkspaceToolService {
   static const int maxOutputChars = 16384;
   static const int maxFileList = 200;
 
+  /// Executes one tool call.
+  ///
+  /// Write tools (`write_file`, `edit_file`, `create_file`,
+  /// `delete_file`) require [checkpointStore] and [taskId]: every agent
+  /// write is checkpointed before it touches the disk, so it can be
+  /// undone later (Batch 2 — desain D2). Without them the write is
+  /// refused instead of running unrecorded. [stepId] is the active
+  /// todo step the change belongs to (`'unplanned'` when unknown).
   Future<ToolExecutionResult> execute({
     required String workspaceRoot,
     required ToolCallInfo call,
     bool allowTermuxExecution = false,
     bool allowAndroidActions = false,
+    CheckpointStore? checkpointStore,
+    String? taskId,
+    String? stepId,
     void Function(String channel, String chunk)? onRuntimeOutput,
     Future<bool> Function(AndroidActionRequest request)? confirmAndroidAction,
   }) async {
@@ -231,6 +196,38 @@ class WorkspaceToolService {
         return _executeReadFile(workspaceRoot, callId, call.arguments);
       case 'search_project':
         return _executeSearch(workspaceRoot, callId, call.arguments);
+      case 'write_file':
+        return _executeWriteFile(
+          workspaceRoot,
+          call,
+          checkpointStore: checkpointStore,
+          taskId: taskId,
+          stepId: stepId,
+        );
+      case 'edit_file':
+        return _executeEditFile(
+          workspaceRoot,
+          call,
+          checkpointStore: checkpointStore,
+          taskId: taskId,
+          stepId: stepId,
+        );
+      case 'create_file':
+        return _executeCreateFile(
+          workspaceRoot,
+          call,
+          checkpointStore: checkpointStore,
+          taskId: taskId,
+          stepId: stepId,
+        );
+      case 'delete_file':
+        return _executeDeleteFile(
+          workspaceRoot,
+          call,
+          checkpointStore: checkpointStore,
+          taskId: taskId,
+          stepId: stepId,
+        );
       case 'run_project_command':
         if (!allowTermuxExecution) {
           return _toolError(
@@ -262,7 +259,9 @@ class WorkspaceToolService {
           toolName: name,
           output: jsonEncode({
             'error':
-                'Tool "$name" is not permitted. Only read-only workspace tools are allowed.',
+                'Tool "$name" is not permitted. Available workspace tools: '
+                'list_project_files, read_project_file, search_project, '
+                'write_file, edit_file, create_file, delete_file.',
           }),
           summary: 'Blocked unauthorized tool "$name"',
           isError: true,
@@ -730,6 +729,589 @@ class WorkspaceToolService {
         output: jsonEncode({'error': 'Search failed: $e'}),
         summary: 'Search error for "$query"',
       );
+    }
+  }
+
+  // ── Write tools (Batch 2 — desain D2) ──────────────────────────────
+  //
+  // Every write goes through [WorkspaceService.resolveSafePath]
+  // (rejects `..`, absolute paths, symlink escapes) and
+  // [WorkspaceService.writeFile] (512 KB cap), and records a
+  // [Checkpoint] BEFORE the disk changes, so the change can be undone.
+
+  /// Resolves a write-tool path, or returns an error result when the
+  /// path is unsafe. Also refuses paths inside the trash folder: the
+  /// trash is managed by [CheckpointStore] only, never by the agent.
+  Future<({String absolutePath, String relativePath})?> _resolveWritePath(
+    String workspaceRoot,
+    String? relativePath,
+  ) async {
+    if (relativePath == null || relativePath.isEmpty) {
+      return null;
+    }
+    final normalized = relativePath.replaceAll('\\', '/');
+    final firstSegment = normalized.split('/').first;
+    if (firstSegment == CheckpointStore.trashDirName) {
+      return null;
+    }
+    try {
+      final absolutePath = await WorkspaceService.resolveSafePath(
+        workspaceRoot,
+        relativePath,
+      );
+      return (absolutePath: absolutePath, relativePath: normalized);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  ToolExecutionResult _writePathError(
+    ToolCallInfo call,
+    String? relativePath,
+    String fallback,
+  ) {
+    final message = relativePath == null || relativePath.isEmpty
+        ? 'Missing or invalid "path" parameter.'
+        : relativePath.replaceAll('\\', '/').split('/').first ==
+                  CheckpointStore.trashDirName
+            ? 'Writing inside the ${CheckpointStore.trashDirName} folder is not allowed.'
+            : 'Unsafe path "$relativePath": $fallback';
+    return _toolError(call, message, 'Blocked unsafe path');
+  }
+
+  /// Reads the current text of an existing file, or null when it does
+  /// not exist. Returns a [_toolError] result (via [onError]) when the
+  /// existing file cannot be safely read as text.
+  Future<({String? before, ToolExecutionResult? error})>
+  _readExistingText(
+    ToolCallInfo call,
+    String absolutePath,
+    String relativePath,
+  ) async {
+    final file = File(absolutePath);
+    final stat = await file.stat();
+    if (stat.type == FileSystemEntityType.notFound) {
+      return (before: null, error: null);
+    }
+    if (stat.type != FileSystemEntityType.file) {
+      return (
+        before: null,
+        error: _toolError(
+          call,
+          '"$relativePath" is not a file.',
+          'Not a file ($relativePath)',
+        ),
+      );
+    }
+    if (stat.size > maxPerFileSizeBytes) {
+      return (
+        before: null,
+        error: _toolError(
+          call,
+          'File exceeds maximum 512 KB limit ($relativePath: ${stat.size} bytes).',
+          'File exceeds 512 KB limit ($relativePath)',
+        ),
+      );
+    }
+    final bytes = await file.readAsBytes();
+    if (bytes.contains(0)) {
+      return (
+        before: null,
+        error: _toolError(
+          call,
+          'Binary file cannot be edited: $relativePath',
+          'Skipped binary file ($relativePath)',
+        ),
+      );
+    }
+    try {
+      return (before: utf8.decode(bytes), error: null);
+    } on FormatException {
+      return (
+        before: null,
+        error: _toolError(
+          call,
+          'File is not valid UTF-8: $relativePath',
+          'Non-UTF8 file ($relativePath)',
+        ),
+      );
+    }
+  }
+
+  /// Validates agent-supplied text content (desain §6: binary writes
+  /// are rejected, 512 KB cap kept). Returns an error message, or null
+  /// when the content is acceptable.
+  String? _validateTextContent(String content, String relativePath) {
+    if (content.contains('\u0000')) {
+      return 'Binary content cannot be written: $relativePath';
+    }
+    if (utf8.encode(content).length > maxPerFileSizeBytes) {
+      return 'Content exceeds maximum 512 KB limit ($relativePath).';
+    }
+    return null;
+  }
+
+  /// Write tools refuse to run unrecorded: without a checkpoint store
+  /// and a task id there is nothing to undo them with.
+  ToolExecutionResult? _requireCheckpointContext(
+    ToolCallInfo call,
+    CheckpointStore? checkpointStore,
+    String? taskId,
+  ) {
+    if (checkpointStore == null || taskId == null || taskId.isEmpty) {
+      return _toolError(
+        call,
+        'Write tools need an active task with checkpoint tracking.',
+        'Write refused (no active task)',
+      );
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _decodeArgs(ToolCallInfo call) {
+    try {
+      final parsed = jsonDecode(call.arguments);
+      if (parsed is Map<String, dynamic>) return parsed;
+      if (parsed is Map) {
+        return parsed.map(
+          (key, value) => MapEntry(key.toString(), value),
+        );
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  String? _stringArg(Map<String, dynamic> args, String name) {
+    final value = args[name];
+    if (value is! String) return null;
+    final trimmed = name == 'path' ? value.trim() : value;
+    return trimmed;
+  }
+
+  Future<ToolExecutionResult> _executeWriteFile(
+    String workspaceRoot,
+    ToolCallInfo call, {
+    CheckpointStore? checkpointStore,
+    String? taskId,
+    String? stepId,
+  }) async {
+    final contextError = _requireCheckpointContext(
+      call,
+      checkpointStore,
+      taskId,
+    );
+    if (contextError != null) return contextError;
+    final args = _decodeArgs(call);
+    final relativePath = args == null ? null : _stringArg(args, 'path');
+    final content = args == null ? null : _stringArg(args, 'content');
+    if (content == null) {
+      return _toolError(
+        call,
+        'Missing or invalid "content" parameter.',
+        'Invalid write request',
+      );
+    }
+    final resolved = await _resolveWritePath(workspaceRoot, relativePath);
+    if (resolved == null) {
+      return _writePathError(
+        call,
+        relativePath,
+        'use a workspace-relative path without ".." or a leading "/".',
+      );
+    }
+    final contentError = _validateTextContent(
+      content,
+      resolved.relativePath,
+    );
+    if (contentError != null) {
+      return _toolError(call, contentError, 'Invalid content');
+    }
+    try {
+      final (before: before, error: readError) = await _readExistingText(
+        call,
+        resolved.absolutePath,
+        resolved.relativePath,
+      );
+      if (readError != null) return readError;
+      if (before == content) {
+        return ToolExecutionResult(
+          callId: call.id,
+          toolName: call.name,
+          output: jsonEncode({
+            'ok': true,
+            'path': resolved.relativePath,
+            'unchanged': true,
+          }),
+          summary: 'No change needed for ${resolved.relativePath}',
+        );
+      }
+      final checkpoint = Checkpoint(
+        taskId: taskId!,
+        stepId: stepId ?? 'unplanned',
+        path: resolved.relativePath,
+        before: before,
+        after: content,
+        kind: CheckpointKind.write,
+      );
+      checkpointStore!.record(checkpoint);
+      try {
+        await WorkspaceService.writeFile(resolved.absolutePath, content);
+      } catch (error) {
+        checkpointStore.remove(checkpoint.id);
+        rethrow;
+      }
+      return ToolExecutionResult(
+        callId: call.id,
+        toolName: call.name,
+        output: jsonEncode({
+          'ok': true,
+          'path': resolved.relativePath,
+          'created': before == null,
+        }),
+        summary: before == null
+            ? 'Created ${resolved.relativePath}'
+            : 'Wrote ${resolved.relativePath}',
+      );
+    } catch (error) {
+      return _toolError(
+        call,
+        'Failed to write ${relativePath ?? ''}: $error',
+        'Write failed',
+      );
+    }
+  }
+
+  Future<ToolExecutionResult> _executeEditFile(
+    String workspaceRoot,
+    ToolCallInfo call, {
+    CheckpointStore? checkpointStore,
+    String? taskId,
+    String? stepId,
+  }) async {
+    final contextError = _requireCheckpointContext(
+      call,
+      checkpointStore,
+      taskId,
+    );
+    if (contextError != null) return contextError;
+    final args = _decodeArgs(call);
+    final relativePath = args == null ? null : _stringArg(args, 'path');
+    final oldText = args == null ? null : _stringArg(args, 'oldText');
+    final newText = args == null ? null : _stringArg(args, 'newText');
+    if (oldText == null || oldText.isEmpty || newText == null) {
+      return _toolError(
+        call,
+        'Missing or invalid "oldText"/"newText" parameters.',
+        'Invalid edit request',
+      );
+    }
+    if (oldText == newText) {
+      return _toolError(
+        call,
+        'oldText and newText are identical — nothing to change.',
+        'No-op edit',
+      );
+    }
+    final resolved = await _resolveWritePath(workspaceRoot, relativePath);
+    if (resolved == null) {
+      return _writePathError(
+        call,
+        relativePath,
+        'use a workspace-relative path without ".." or a leading "/".',
+      );
+    }
+    final contentError = _validateTextContent(newText, resolved.relativePath);
+    if (contentError != null) {
+      return _toolError(call, contentError, 'Invalid content');
+    }
+    try {
+      final (before: before, error: readError) = await _readExistingText(
+        call,
+        resolved.absolutePath,
+        resolved.relativePath,
+      );
+      if (readError != null) return readError;
+      if (before == null) {
+        return _toolError(
+          call,
+          'File not found: ${resolved.relativePath}. Use create_file to create it.',
+          'File not found (${resolved.relativePath})',
+        );
+      }
+      final matches = _countOccurrences(before, oldText);
+      if (matches == 0) {
+        return _toolError(
+          call,
+          'No occurrence of the given text was found in ${resolved.relativePath}. '
+          'Read the file again and copy the exact text, including indentation.',
+          'Text not found in ${resolved.relativePath}',
+        );
+      }
+      if (matches > 1) {
+        return _toolError(
+          call,
+          'The given text matches $matches times in ${resolved.relativePath}. '
+          'Include more surrounding context so it matches exactly once — '
+          'never guess which occurrence to change.',
+          'Ambiguous edit in ${resolved.relativePath}',
+        );
+      }
+      final after = before.replaceFirst(oldText, newText);
+      final sizeError = _validateTextContent(after, resolved.relativePath);
+      if (sizeError != null) {
+        return _toolError(call, sizeError, 'Invalid content');
+      }
+      final checkpoint = Checkpoint(
+        taskId: taskId!,
+        stepId: stepId ?? 'unplanned',
+        path: resolved.relativePath,
+        before: before,
+        after: after,
+        kind: CheckpointKind.write,
+      );
+      checkpointStore!.record(checkpoint);
+      try {
+        await WorkspaceService.writeFile(resolved.absolutePath, after);
+      } catch (error) {
+        checkpointStore.remove(checkpoint.id);
+        rethrow;
+      }
+      return ToolExecutionResult(
+        callId: call.id,
+        toolName: call.name,
+        output: jsonEncode({'ok': true, 'path': resolved.relativePath}),
+        summary: 'Edited ${resolved.relativePath}',
+      );
+    } catch (error) {
+      return _toolError(
+        call,
+        'Failed to edit ${relativePath ?? ''}: $error',
+        'Edit failed',
+      );
+    }
+  }
+
+  Future<ToolExecutionResult> _executeCreateFile(
+    String workspaceRoot,
+    ToolCallInfo call, {
+    CheckpointStore? checkpointStore,
+    String? taskId,
+    String? stepId,
+  }) async {
+    final contextError = _requireCheckpointContext(
+      call,
+      checkpointStore,
+      taskId,
+    );
+    if (contextError != null) return contextError;
+    final args = _decodeArgs(call);
+    final relativePath = args == null ? null : _stringArg(args, 'path');
+    final content = args == null ? null : _stringArg(args, 'content');
+    if (content == null) {
+      return _toolError(
+        call,
+        'Missing or invalid "content" parameter.',
+        'Invalid create request',
+      );
+    }
+    final resolved = await _resolveWritePath(workspaceRoot, relativePath);
+    if (resolved == null) {
+      return _writePathError(
+        call,
+        relativePath,
+        'use a workspace-relative path without ".." or a leading "/".',
+      );
+    }
+    final contentError = _validateTextContent(
+      content,
+      resolved.relativePath,
+    );
+    if (contentError != null) {
+      return _toolError(call, contentError, 'Invalid content');
+    }
+    try {
+      final (before: before, error: readError) = await _readExistingText(
+        call,
+        resolved.absolutePath,
+        resolved.relativePath,
+      );
+      if (readError != null) return readError;
+      if (before != null) {
+        return _toolError(
+          call,
+          'File already exists: ${resolved.relativePath}. '
+          'Use edit_file or write_file to change it.',
+          'File already exists (${resolved.relativePath})',
+        );
+      }
+      final checkpoint = Checkpoint(
+        taskId: taskId!,
+        stepId: stepId ?? 'unplanned',
+        path: resolved.relativePath,
+        before: null,
+        after: content,
+        kind: CheckpointKind.write,
+      );
+      checkpointStore!.record(checkpoint);
+      try {
+        await WorkspaceService.writeFile(resolved.absolutePath, content);
+      } catch (error) {
+        checkpointStore.remove(checkpoint.id);
+        rethrow;
+      }
+      return ToolExecutionResult(
+        callId: call.id,
+        toolName: call.name,
+        output: jsonEncode({'ok': true, 'path': resolved.relativePath}),
+        summary: 'Created ${resolved.relativePath}',
+      );
+    } catch (error) {
+      return _toolError(
+        call,
+        'Failed to create ${relativePath ?? ''}: $error',
+        'Create failed',
+      );
+    }
+  }
+
+  Future<ToolExecutionResult> _executeDeleteFile(
+    String workspaceRoot,
+    ToolCallInfo call, {
+    CheckpointStore? checkpointStore,
+    String? taskId,
+    String? stepId,
+  }) async {
+    final contextError = _requireCheckpointContext(
+      call,
+      checkpointStore,
+      taskId,
+    );
+    if (contextError != null) return contextError;
+    final args = _decodeArgs(call);
+    final relativePath = args == null ? null : _stringArg(args, 'path');
+    final resolved = await _resolveWritePath(workspaceRoot, relativePath);
+    if (resolved == null) {
+      return _writePathError(
+        call,
+        relativePath,
+        'use a workspace-relative path without ".." or a leading "/".',
+      );
+    }
+    try {
+      final (exists: exists, before: before, error: readError) =
+          await _readDeleteBefore(
+            call,
+            resolved.absolutePath,
+            resolved.relativePath,
+          );
+      if (readError != null) return readError;
+      if (!exists) {
+        return _toolError(
+          call,
+          'File not found: ${resolved.relativePath}.',
+          'File not found (${resolved.relativePath})',
+        );
+      }
+      // Binary / oversized files can still be deleted: the trash copy
+      // holds the bytes, so undo does not need a text snapshot.
+      final trashRelativePath = CheckpointStore.trashPathFor(
+        taskId!,
+        resolved.relativePath,
+      );
+      final trashAbsolutePath = p.join(workspaceRoot, trashRelativePath);
+      if (await File(trashAbsolutePath).exists()) {
+        return _toolError(
+          call,
+          'A trashed copy of ${resolved.relativePath} already exists for this task.',
+          'Trash conflict for ${resolved.relativePath}',
+        );
+      }
+      final checkpoint = Checkpoint(
+        taskId: taskId,
+        stepId: stepId ?? 'unplanned',
+        path: resolved.relativePath,
+        before: before,
+        after: null,
+        trashPath: trashRelativePath,
+        kind: CheckpointKind.delete,
+      );
+      checkpointStore!.record(checkpoint);
+      try {
+        await Directory(p.dirname(trashAbsolutePath)).create(recursive: true);
+        await File(resolved.absolutePath).rename(trashAbsolutePath);
+      } catch (error) {
+        checkpointStore.remove(checkpoint.id);
+        rethrow;
+      }
+      return ToolExecutionResult(
+        callId: call.id,
+        toolName: call.name,
+        output: jsonEncode({
+          'ok': true,
+          'path': resolved.relativePath,
+          'trashPath': trashRelativePath,
+        }),
+        summary:
+            'Moved ${resolved.relativePath} to trash (restorable until the task finishes)',
+      );
+    } catch (error) {
+      return _toolError(
+        call,
+        'Failed to delete ${relativePath ?? ''}: $error',
+        'Delete failed',
+      );
+    }
+  }
+
+  /// Reads the text snapshot for a delete. [exists] is false when the
+  /// file is gone; [before] is null when the file exists but has no
+  /// usable text snapshot (binary, oversized, or invalid UTF-8). Only
+  /// a directory target is an error - anything else can be trashed and
+  /// restored from the trash copy.
+  Future<({bool exists, String? before, ToolExecutionResult? error})>
+  _readDeleteBefore(
+    ToolCallInfo call,
+    String absolutePath,
+    String relativePath,
+  ) async {
+    final file = File(absolutePath);
+    final stat = await file.stat();
+    if (stat.type == FileSystemEntityType.notFound) {
+      return (exists: false, before: null, error: null);
+    }
+    if (stat.type != FileSystemEntityType.file) {
+      return (
+        exists: true,
+        before: null,
+        error: _toolError(
+          call,
+          '"$relativePath" is not a file.',
+          'Not a file ($relativePath)',
+        ),
+      );
+    }
+    if (stat.size > maxPerFileSizeBytes) {
+      return (exists: true, before: null, error: null);
+    }
+    final bytes = await file.readAsBytes();
+    if (bytes.contains(0)) return (exists: true, before: null, error: null);
+    try {
+      return (exists: true, before: utf8.decode(bytes), error: null);
+    } on FormatException {
+      return (exists: true, before: null, error: null);
+    }
+  }
+
+  /// Counts non-overlapping exact occurrences of [needle] in
+  /// [haystack] (D2: edit_file needs exactly one).
+  static int _countOccurrences(String haystack, String needle) {
+    var count = 0;
+    var start = 0;
+    while (true) {
+      final index = haystack.indexOf(needle, start);
+      if (index < 0) return count;
+      count++;
+      start = index + needle.length;
     }
   }
 }

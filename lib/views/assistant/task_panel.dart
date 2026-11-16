@@ -14,11 +14,18 @@ class TaskPanel extends StatelessWidget {
   final bool isRunning;
   final VoidCallback onStop;
 
+  /// Number of recorded agent changes for this task (Batch 2). When
+  /// greater than zero, a button opens the change history with undo.
+  final int changeCount;
+  final VoidCallback? onViewChanges;
+
   const TaskPanel({
     super.key,
     required this.task,
     required this.isRunning,
     required this.onStop,
+    this.changeCount = 0,
+    this.onViewChanges,
   });
 
   static String statusLabel(TaskStatus status) => switch (status) {
@@ -123,6 +130,24 @@ class TaskPanel extends StatelessWidget {
                 ),
             ],
           ),
+          if (changeCount > 0) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                style: TextButton.styleFrom(
+                  minimumSize: const Size(44, 36),
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  visualDensity: VisualDensity.compact,
+                ),
+                icon: const Icon(Icons.history_rounded, size: 16),
+                label: Text(
+                  changeCount == 1 ? '1 change' : '$changeCount changes',
+                ),
+                onPressed: onViewChanges,
+              ),
+            ),
+          ],
           if (!isRunning) ...[
             const SizedBox(height: 4),
             Text(
