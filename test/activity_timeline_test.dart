@@ -58,7 +58,6 @@ void main() {
       ),
     ]);
 
-    expect(find.text('Activity'), findsOneWidget);
     expect(find.text('read_project_file'), findsOneWidget);
     expect(find.text('write_file'), findsOneWidget);
     expect(find.text('Selesai'), findsOneWidget);
@@ -68,7 +67,8 @@ void main() {
       find.text('Write failed: path is outside the project'),
       findsOneWidget,
     );
-    expect(find.text('2 calls'), findsOneWidget);
+    // Terminal look: no "Activity" header and no call count.
+    expect(find.text('Activity'), findsNothing);
   });
 
   testWidgets('shows a running call as Berjalan', (tester) async {
@@ -83,7 +83,8 @@ void main() {
 
     expect(find.text('run_project_command'), findsOneWidget);
     expect(find.text('Berjalan'), findsOneWidget);
-    expect(find.text('1 call'), findsOneWidget);
+    // Terminal look: no "Activity" header and no call count.
+    expect(find.text('Activity'), findsNothing);
   });
 
   testWidgets('denied and cancelled statuses have their own labels', (

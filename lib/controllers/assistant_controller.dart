@@ -113,9 +113,9 @@ class AssistantController extends GetxController {
   final RxString diffOnlyNotice = ''.obs;
 
   /// Tool-call records of the active task, oldest first (Batch 5 —
-  /// desain D9). The ActivityTimeline renders one card per record; a
-  /// running call is appended when it starts and updated when it
-  /// finishes. Persisted through [taskStore] with the task.
+  /// desain D9). The ActivityTimeline renders one terminal line per
+  /// record; a running call is appended when it starts and updated
+  /// when it finishes. Persisted through [taskStore] with the task.
   final RxList<ToolCallRecord> toolCallRecords = <ToolCallRecord>[].obs;
 
   /// Active agent task (Batch 1, desain D3/D9). Null when no task has

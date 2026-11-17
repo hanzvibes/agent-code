@@ -39,7 +39,7 @@ Future<void> _pumpPanel(
 }
 
 void main() {
-  testWidgets('shows title, mode, todo progress and budget', (tester) async {
+  testWidgets('shows title, mode and todo progress', (tester) async {
     final task = AgentTask(
       title: 'Add the login screen',
       mode: AgentMode.agent,
@@ -57,7 +57,9 @@ void main() {
     expect(find.text('Add the login screen'), findsOneWidget);
     expect(find.text('Agent'), findsOneWidget);
     expect(find.text('1/3 langkah'), findsOneWidget);
-    expect(find.text('Ronde 2/25 • Tool 5/60'), findsOneWidget);
+    // The budget line (rounds/tools) moved to TerminalStatusLine
+    // above the prompt — see test/chat_terminal_test.dart.
+    expect(find.text('Ronde 2/25 • Tool 5/60'), findsNothing);
     expect(find.text('Stop'), findsOneWidget);
   });
 
@@ -87,18 +89,8 @@ void main() {
     expect(find.text('1/1 langkah'), findsOneWidget);
   });
 
-  testWidgets('warns when the budget is 80 percent used', (tester) async {
-    final task = AgentTask(
-      title: 'Almost out of budget',
-      roundsUsed: 20,
-      toolCallsUsed: 10,
-    );
-
-    await _pumpPanel(tester, task);
-
-    expect(find.text('Anggaran hampir habis'), findsOneWidget);
-  });
-
+  // The 80% budget warning moved with the budget line to
+  // TerminalStatusLine — see test/chat_terminal_test.dart.
   testWidgets('paused task shows the resumable status', (tester) async {
     final task = AgentTask(title: 'Paused task', status: TaskStatus.paused);
 
