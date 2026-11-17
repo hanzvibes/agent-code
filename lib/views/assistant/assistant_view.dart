@@ -9,6 +9,7 @@ import '../../controllers/app_controller.dart';
 import '../../controllers/assistant_controller.dart';
 import '../../controllers/project_controller.dart';
 import '../../controllers/review_controller.dart';
+import '../../core/theme.dart';
 import '../../core/ui.dart';
 import '../../models/agent_task.dart';
 import '../../services/android_native_action_service.dart';
@@ -23,6 +24,7 @@ import '../review/review_view.dart';
 import '../settings/provider_form_view.dart';
 import 'activity_timeline.dart';
 import 'task_panel.dart';
+import 'terminal.dart';
 
 class AssistantView extends StatefulWidget {
   const AssistantView({super.key});
@@ -67,7 +69,6 @@ class _AssistantViewState extends State<AssistantView> {
 
   @override
   Widget build(BuildContext context) {
-    final t = AppTokens.of(context);
     final ctrl = Get.find<AssistantController>();
     ctrl.onAndroidActionApproval = (request) =>
         _confirmAndroidAction(context, request);
@@ -75,155 +76,150 @@ class _AssistantViewState extends State<AssistantView> {
         _confirmPermission(context, request);
     final projCtrl = Get.find<ProjectController>();
 
-    return Scaffold(
-      backgroundColor: t.bg,
-      appBar: appScreenBar(
-        context,
-        title: 'Assistant',
-        actions: [
-          IconButton(
-            icon: Icon(Icons.tune_rounded, size: 22, color: t.text),
-            tooltip: 'Generation & tools',
-            onPressed: () => _openSettingsSheet(context, ctrl),
+    // Claude Code terminal look (Opsi A): the whole screen is forced
+    // dark so the AppTokens-based children (markdown, sheets) render
+    // dark on the warm terminal background, in light mode too.
+    return Theme(
+      data: buildTheme(isDark: true),
+      child: Scaffold(
+        backgroundColor: TerminalTokens.bg,
+        body: SafeArea(
+          top: true,
+          bottom: false,
+          child: Column(
+            children: [
+              _TerminalScreenBar(
+                ctrl: ctrl,
+                onOpenSettings: () => _openSettingsSheet(context, ctrl),
+              ),
+              Expanded(
+                child: Obx(() {
+                  if (!ctrl.hasProfile) return const _NoProfileState();
+                  // Rebuild when the change history changes (write tool / undo).
+                  ctrl.changeHistoryRevision.value;
+                  return Column(
+                    children: [
+                      _ContextBanner(projCtrl: projCtrl, ctrl: ctrl),
+                      if (ctrl.activeTask.value != null)
+                        TaskPanel(
+                          task: ctrl.activeTask.value!,
+                          isRunning: ctrl.isLoading.value,
+                          onStop: ctrl.stopAgent,
+                          changeCount: ctrl.activeTaskCheckpoints.length,
+                          onViewChanges: () =>
+                              _openChangeHistory(context, ctrl),
+                          mode: ctrl.agentMode.value,
+                          onModeChanged: (mode) => ctrl.setAgentMode(mode),
+                          toolCalls: ctrl.toolCallRecords,
+                          onResume: ctrl.resumeTask,
+                        ),
+                      Expanded(
+                        child: ctrl.isRestoringSession.value
+                            ? Center(
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: TerminalTokens.accent,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 12),
+                                    Text(
+                                      'Loading saved conversation…',
+                                      style: TerminalTokens.caption,
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : ctrl.messages.isEmpty && !ctrl.isLoading.value
+                            ? _EmptyAssistant(ctrl: ctrl)
+                            : ListView.builder(
+                                controller: _scrollController,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                  horizontal: 16,
+                                ),
+                                itemCount:
+                                    ctrl.messages.length +
+                                    (ctrl.isLoading.value &&
+                                            ctrl.streamingText.value.isNotEmpty
+                                        ? 1
+                                        : 0),
+                                itemBuilder: (ctx, i) {
+                                  if (i < ctrl.messages.length) {
+                                    final msg = ctrl.messages[i];
+                                    final isLatestAssistant =
+                                        msg.role == 'assistant' &&
+                                        i == ctrl.messages.length - 1;
+                                    return _TerminalMessage(
+                                      message: msg,
+                                      isLatestAssistant: isLatestAssistant,
+                                      canRegenerate:
+                                          ctrl.canRegenerate &&
+                                          isLatestAssistant,
+                                      onRegenerate: ctrl.regenerate,
+                                    );
+                                  } else {
+                                    // Streaming response in progress
+                                    return _StreamingLine(
+                                      text: ctrl.streamingText.value,
+                                    );
+                                  }
+                                },
+                              ),
+                      ),
+                      // Activity timeline (Batch 5 — desain D9): one
+                      // terminal line per tool call, below the messages.
+                      ActivityTimeline(
+                        records: ctrl.toolCallRecords,
+                        isRunning: ctrl.isLoading.value,
+                      ),
+                      if (ctrl.statusMessage.value.isNotEmpty)
+                        _StatusLine(
+                          status: ctrl.statusMessage.value,
+                          onCancel: ctrl.cancelRequest,
+                        ),
+                      if (ctrl.diffOnlyNotice.value.isNotEmpty)
+                        _InfoLine(
+                          notice: ctrl.diffOnlyNotice.value,
+                          onDismiss: ctrl.clearDiffOnlyNotice,
+                        ),
+                      if (ctrl.lastError.value.isNotEmpty)
+                        _ErrorLine(
+                          error: ctrl.lastError.value,
+                          canRetry: ctrl.canRetry,
+                          onRetry: ctrl.retry,
+                        ),
+                      if (ctrl.pendingPatch.value.isNotEmpty)
+                        _PatchLine(ctrl: ctrl, projCtrl: projCtrl),
+                      if (projCtrl.canRollbackPatch)
+                        _RollbackLine(projCtrl: projCtrl),
+                      TerminalStatusLine(
+                        profileName: Get.find<AppController>()
+                            .activeProfile
+                            .value
+                            ?.name,
+                        task: ctrl.activeTask.value,
+                      ),
+                      TerminalPromptBar(
+                        controller: _textController,
+                        isLoading: ctrl.isLoading.value,
+                        isRestoringSession: ctrl.isRestoringSession.value,
+                        onSend: () => _send(ctrl),
+                        onCancel: ctrl.cancelRequest,
+                      ),
+                    ],
+                  );
+                }),
+              ),
+            ],
           ),
-          Obx(
-            () => ctrl.messages.isNotEmpty
-                ? IconButton(
-                    icon: Icon(
-                      Icons.delete_outline_rounded,
-                      size: 22,
-                      color: t.text,
-                    ),
-                    tooltip: 'Clear conversation',
-                    onPressed: () async {
-                      final ok = await confirmSheet(
-                        context,
-                        title: 'Clear conversation?',
-                        message:
-                            'This will delete the stored chat session for this workspace.',
-                        confirmLabel: 'Clear',
-                        destructive: true,
-                      );
-                      if (ok) await ctrl.clearConversation();
-                    },
-                  )
-                : const SizedBox.shrink(),
-          ),
-        ],
+        ),
       ),
-      body: Obx(() {
-        if (!ctrl.hasProfile) return const _NoProfileState();
-        // Rebuild when the change history changes (write tool / undo).
-        ctrl.changeHistoryRevision.value;
-        return Column(
-          children: [
-            _ContextBanner(projCtrl: projCtrl, ctrl: ctrl),
-            if (ctrl.activeTask.value != null)
-              TaskPanel(
-                task: ctrl.activeTask.value!,
-                isRunning: ctrl.isLoading.value,
-                onStop: ctrl.stopAgent,
-                changeCount: ctrl.activeTaskCheckpoints.length,
-                onViewChanges: () => _openChangeHistory(context, ctrl),
-                mode: ctrl.agentMode.value,
-                onModeChanged: (mode) => ctrl.setAgentMode(mode),
-                toolCalls: ctrl.toolCallRecords,
-                onResume: ctrl.resumeTask,
-              ),
-            Expanded(
-              child: ctrl.isRestoringSession.value
-                  ? Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const SizedBox(
-                            width: 22,
-                            height: 22,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          ),
-                          const SizedBox(height: 12),
-                          Text('Loading saved conversation…', style: t.caption),
-                        ],
-                      ),
-                    )
-                  : ctrl.messages.isEmpty && !ctrl.isLoading.value
-                  ? _EmptyAssistant(t: t, ctrl: ctrl)
-                  : ListView.builder(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.symmetric(
-                        vertical: 12,
-                        horizontal: 16,
-                      ),
-                      itemCount:
-                          ctrl.messages.length +
-                          (ctrl.isLoading.value &&
-                                  ctrl.streamingText.value.isNotEmpty
-                              ? 1
-                              : 0),
-                      itemBuilder: (ctx, i) {
-                        if (i < ctrl.messages.length) {
-                          final msg = ctrl.messages[i];
-                          final isLatestAssistant =
-                              msg.role == 'assistant' &&
-                              i == ctrl.messages.length - 1;
-                          return _MessageBubble(
-                            message: msg,
-                            t: t,
-                            isLatestAssistant: isLatestAssistant,
-                            canRegenerate:
-                                ctrl.canRegenerate && isLatestAssistant,
-                            onRegenerate: ctrl.regenerate,
-                          );
-                        } else {
-                          // Streaming response in progress
-                          return _StreamingBubble(
-                            text: ctrl.streamingText.value,
-                            t: t,
-                          );
-                        }
-                      },
-                    ),
-            ),
-            // Activity timeline (Batch 5 — desain D9): one card per
-            // tool call, replacing the single runtime-output card.
-            ActivityTimeline(
-              records: ctrl.toolCallRecords,
-              isRunning: ctrl.isLoading.value,
-            ),
-            if (ctrl.statusMessage.value.isNotEmpty)
-              _StatusBanner(
-                status: ctrl.statusMessage.value,
-                t: t,
-                onCancel: ctrl.cancelRequest,
-              ),
-            if (ctrl.diffOnlyNotice.value.isNotEmpty)
-              _InfoBanner(
-                notice: ctrl.diffOnlyNotice.value,
-                t: t,
-                onDismiss: ctrl.clearDiffOnlyNotice,
-              ),
-            if (ctrl.lastError.value.isNotEmpty)
-              _ErrorBanner(
-                error: ctrl.lastError.value,
-                t: t,
-                canRetry: ctrl.canRetry,
-                onRetry: ctrl.retry,
-              ),
-            if (ctrl.pendingPatch.value.isNotEmpty)
-              _PatchBanner(ctrl: ctrl, projCtrl: projCtrl, t: t),
-            if (projCtrl.canRollbackPatch)
-              _RollbackBanner(projCtrl: projCtrl, t: t),
-            _InputBar(
-              controller: _textController,
-              isLoading: ctrl.isLoading.value,
-              isRestoringSession: ctrl.isRestoringSession.value,
-              onSend: () => _send(ctrl),
-              onCancel: ctrl.cancelRequest,
-              t: t,
-            ),
-          ],
-        );
-      }),
     );
   }
 
@@ -241,6 +237,7 @@ class _AssistantViewState extends State<AssistantView> {
           context: context,
           isScrollControlled: true,
           useSafeArea: true,
+          backgroundColor: TerminalTokens.sheetBg,
           builder: (sheetContext) {
             final t = AppTokens.of(sheetContext);
             return Padding(
@@ -254,7 +251,7 @@ class _AssistantViewState extends State<AssistantView> {
                       width: 36,
                       height: 4,
                       decoration: BoxDecoration(
-                        color: t.sheetHandle,
+                        color: TerminalTokens.faint,
                         borderRadius: BorderRadius.circular(2),
                       ),
                     ),
@@ -264,19 +261,26 @@ class _AssistantViewState extends State<AssistantView> {
                   const SizedBox(height: 6),
                   Text(request.description, style: t.caption),
                   const SizedBox(height: 12),
-                  AppCard(
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: TerminalTokens.hairline),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxHeight: 180),
                       child: SingleChildScrollView(
                         child: SelectableText(
                           request.preview,
-                          style: t.small.copyWith(fontFamily: 'monospace'),
+                          style: TerminalTokens.monoSmall.copyWith(
+                            color: TerminalTokens.text,
+                          ),
                         ),
                       ),
                     ),
                   ),
                   const SizedBox(height: 16),
-                  PrimaryButton(
+                  TerminalPrimaryButton(
                     label: actionLabel,
                     onPressed: () => Navigator.of(sheetContext).pop(true),
                   ),
@@ -307,6 +311,7 @@ class _AssistantViewState extends State<AssistantView> {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
+      backgroundColor: TerminalTokens.sheetBg,
       builder: (sheetContext) {
         final t = AppTokens.of(sheetContext);
         return Padding(
@@ -320,7 +325,7 @@ class _AssistantViewState extends State<AssistantView> {
                   width: 36,
                   height: 4,
                   decoration: BoxDecoration(
-                    color: t.sheetHandle,
+                    color: TerminalTokens.faint,
                     borderRadius: BorderRadius.circular(2),
                   ),
                 ),
@@ -330,19 +335,26 @@ class _AssistantViewState extends State<AssistantView> {
               const SizedBox(height: 6),
               Text(request.description, style: t.caption),
               const SizedBox(height: 12),
-              AppCard(
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  border: Border.all(color: TerminalTokens.hairline),
+                  borderRadius: BorderRadius.circular(8),
+                ),
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxHeight: 180),
                   child: SingleChildScrollView(
                     child: SelectableText(
                       request.preview,
-                      style: t.small.copyWith(fontFamily: 'monospace'),
+                      style: TerminalTokens.monoSmall.copyWith(
+                        color: TerminalTokens.text,
+                      ),
                     ),
                   ),
                 ),
               ),
               const SizedBox(height: 16),
-              PrimaryButton(
+              TerminalPrimaryButton(
                 label: 'Allow once',
                 onPressed: () => Navigator.of(sheetContext).pop('once'),
               ),
@@ -392,6 +404,67 @@ class _AssistantViewState extends State<AssistantView> {
   }
 }
 
+// ── Slim terminal screen bar ───────────────────────────────────────────
+
+/// Replaces the old Material app bar: a 48px flat strip with the mono
+/// 'Assistant' title and the two screen actions (generation settings,
+/// clear conversation). No elevation, no surface — just a hairline.
+class _TerminalScreenBar extends StatelessWidget {
+  final AssistantController ctrl;
+  final VoidCallback onOpenSettings;
+
+  const _TerminalScreenBar({required this.ctrl, required this.onOpenSettings});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.only(left: 16, right: 4),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: TerminalTokens.hairline)),
+      ),
+      child: Row(
+        children: [
+          Text('Assistant', style: TerminalTokens.titleMono),
+          const Spacer(),
+          IconButton(
+            icon: const Icon(
+              Icons.tune_rounded,
+              size: 22,
+              color: TerminalTokens.muted,
+            ),
+            tooltip: 'Generation & tools',
+            onPressed: onOpenSettings,
+          ),
+          Obx(
+            () => ctrl.messages.isNotEmpty
+                ? IconButton(
+                    icon: const Icon(
+                      Icons.delete_outline_rounded,
+                      size: 22,
+                      color: TerminalTokens.muted,
+                    ),
+                    tooltip: 'Clear conversation',
+                    onPressed: () async {
+                      final ok = await confirmSheet(
+                        context,
+                        title: 'Clear conversation?',
+                        message:
+                            'This will delete the stored chat session for this workspace.',
+                        confirmLabel: 'Clear',
+                        destructive: true,
+                      );
+                      if (ok) await ctrl.clearConversation();
+                    },
+                  )
+                : const SizedBox.shrink(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ── No-profile empty state ───────────────────────────────────────────────
 
 class _NoProfileState extends StatelessWidget {
@@ -399,24 +472,27 @@ class _NoProfileState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = AppTokens.of(context);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.cloud_off_rounded, size: 56, color: t.faint),
+            const Icon(
+              Icons.cloud_off_rounded,
+              size: 56,
+              color: TerminalTokens.faint,
+            ),
             const SizedBox(height: 20),
-            Text('No provider configured', style: t.title),
+            Text('No provider configured', style: TerminalTokens.titleMono),
             const SizedBox(height: 8),
             Text(
               'Add a provider profile in Settings to use the AI assistant.',
-              style: t.caption,
+              style: TerminalTokens.caption,
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
-            PrimaryButton(
+            TerminalPrimaryButton(
               label: 'Add an AI provider',
               icon: Icons.add_rounded,
               onPressed: () => Navigator.of(context).push(
@@ -442,7 +518,6 @@ class _ContextBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final t = AppTokens.of(context);
     return Obx(() {
       final total = ctrl.contextFileCount;
       final extra = ctrl.selectedExtraContextCount;
@@ -478,40 +553,35 @@ class _ContextBanner extends StatelessWidget {
 
       return Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        color: t.surface,
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: TerminalTokens.hairline)),
+        ),
         child: Row(
           children: [
-            Icon(Icons.info_outline_rounded, size: 14, color: t.muted),
+            const Icon(
+              Icons.info_outline_rounded,
+              size: 14,
+              color: TerminalTokens.faint,
+            ),
             const SizedBox(width: 8),
-            Expanded(child: Text(bannerText, style: t.small)),
+            Expanded(child: Text(bannerText, style: TerminalTokens.small)),
             if (ctrl.hasAgentsInstructions) ...[
               const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: t.accent.withValues(alpha: 0.12),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: t.accent.withValues(alpha: 0.3)),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.shield_outlined, size: 12, color: t.accent),
-                    const SizedBox(width: 4),
-                    Text(
-                      ctrl.lastAgentsInstructions.value!.uiLabel,
-                      style: t.small.copyWith(
-                        color: t.accent,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
+              Text(
+                ctrl.lastAgentsInstructions.value!.uiLabel,
+                style: TerminalTokens.monoSmall.copyWith(
+                  color: TerminalTokens.accent,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
             if (projCtrl.hasWorkspace)
               IconButton(
-                icon: Icon(Icons.file_copy_outlined, size: 18, color: t.accent),
+                icon: const Icon(
+                  Icons.file_copy_outlined,
+                  size: 18,
+                  color: TerminalTokens.accent,
+                ),
                 tooltip: 'Choose context files',
                 constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
                 onPressed: ctrl.isLoading.value
@@ -735,9 +805,8 @@ class _ContextFileRow extends StatelessWidget {
 // ── Empty / quick-prompt state ───────────────────────────────────────────
 
 class _EmptyAssistant extends StatelessWidget {
-  final AppTokens t;
   final AssistantController ctrl;
-  const _EmptyAssistant({required this.t, required this.ctrl});
+  const _EmptyAssistant({required this.ctrl});
 
   static const _chips = [
     (
@@ -765,11 +834,18 @@ class _EmptyAssistant extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.chat_bubble_outline_rounded, size: 48, color: t.faint),
-            const SizedBox(height: 16),
+            Text(
+              '>',
+              style: TerminalTokens.mono.copyWith(
+                fontSize: 32,
+                fontWeight: FontWeight.w700,
+                color: TerminalTokens.accent,
+              ),
+            ),
+            const SizedBox(height: 12),
             Text(
               'Ask anything about your project',
-              style: t.caption,
+              style: TerminalTokens.caption,
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
@@ -783,7 +859,6 @@ class _EmptyAssistant extends StatelessWidget {
                     icon: icon,
                     label: label,
                     onTap: () => ctrl.sendMessage(prompt),
-                    t: t,
                   ),
               ],
             ),
@@ -798,13 +873,11 @@ class _QuickPromptChip extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
-  final AppTokens t;
 
   const _QuickPromptChip({
     required this.icon,
     required this.label,
     required this.onTap,
-    required this.t,
   });
 
   @override
@@ -814,19 +887,17 @@ class _QuickPromptChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: t.surface,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: t.outline),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: TerminalTokens.hairline),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 15, color: t.muted),
+            Icon(icon, size: 15, color: TerminalTokens.muted),
             const SizedBox(width: 6),
             Text(
               label,
-              style: t.caption.copyWith(
-                color: t.text,
+              style: TerminalTokens.mono.copyWith(
                 fontWeight: FontWeight.w500,
               ),
             ),
@@ -837,18 +908,20 @@ class _QuickPromptChip extends StatelessWidget {
   }
 }
 
-// ── Message bubble ───────────────────────────────────────────────────────
+// ── Terminal message row ───────────────────────────────────────────────
 
-class _MessageBubble extends StatelessWidget {
+/// Claude Code style: no bubble, no avatar — the user's turn is plain
+/// text prefixed with a coral `>`, the assistant's turn is plain
+/// markdown text. Copy / Regenerate stay as small muted text actions
+/// under the latest assistant turn.
+class _TerminalMessage extends StatelessWidget {
   final ChatMessage message;
-  final AppTokens t;
   final bool isLatestAssistant;
   final bool canRegenerate;
   final VoidCallback? onRegenerate;
 
-  const _MessageBubble({
+  const _TerminalMessage({
     required this.message,
-    required this.t,
     this.isLatestAssistant = false,
     this.canRegenerate = false,
     this.onRegenerate,
@@ -857,203 +930,196 @@ class _MessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isUser = message.role == 'user';
+    if (isUser) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 14),
+        child: GestureDetector(
+          onLongPress: () {
+            Clipboard.setData(ClipboardData(text: message.content));
+            showToast(
+              'Copied',
+              'Message copied to clipboard',
+              tone: ToastTone.success,
+            );
+          },
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '>',
+                style: TerminalTokens.mono.copyWith(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: TerminalTokens.accent,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(message.content, style: TerminalTokens.body),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: isUser
-            ? MainAxisAlignment.end
-            : MainAxisAlignment.start,
         children: [
-          if (!isUser) ...[
-            Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                color: t.accent.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(Icons.smart_toy_outlined, size: 18, color: t.accent),
-            ),
-            const SizedBox(width: 10),
-          ],
-          Flexible(
-            child: Column(
-              crossAxisAlignment: isUser
-                  ? CrossAxisAlignment.end
-                  : CrossAxisAlignment.start,
-              children: [
-                GestureDetector(
-                  onLongPress: () {
+          MarkdownMessageView(content: message.content, t: AppTokens.of(context)),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Semantics(
+                label: 'Copy entire response',
+                button: true,
+                child: TextButton(
+                  style: TextButton.styleFrom(
+                    minimumSize: const Size(44, 32),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: () {
                     Clipboard.setData(ClipboardData(text: message.content));
                     showToast(
                       'Copied',
-                      'Message copied to clipboard',
+                      'Full response copied to clipboard',
                       tone: ToastTone.success,
                     );
                   },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      color: isUser ? t.accent : t.surface,
-                      borderRadius: BorderRadius.circular(16).copyWith(
-                        bottomRight: isUser ? const Radius.circular(4) : null,
-                        bottomLeft: isUser ? null : const Radius.circular(4),
-                      ),
-                      border: isUser ? null : Border.all(color: t.hairline),
-                    ),
-                    child: isUser
-                        ? Text(
-                            message.content,
-                            style: t.body.copyWith(
-                              color: Colors.white,
-                              fontSize: 14.5,
-                              height: 1.35,
-                            ),
-                          )
-                        : MarkdownMessageView(content: message.content, t: t),
+                  child: Text(
+                    'copy',
+                    style: TerminalTokens.monoSmall,
                   ),
                 ),
-                if (!isUser) ...[
-                  const SizedBox(height: 4),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      // Explicit one-tap copy button for full assistant response
-                      Semantics(
-                        label: 'Copy entire response',
-                        button: true,
-                        child: IconButton(
-                          tooltip: 'Copy entire response',
-                          constraints: const BoxConstraints(
-                            minWidth: 44,
-                            minHeight: 44,
-                          ),
-                          icon: Icon(
-                            Icons.copy_all_rounded,
-                            size: 16,
-                            color: t.muted,
-                          ),
-                          onPressed: () {
-                            Clipboard.setData(
-                              ClipboardData(text: message.content),
-                            );
-                            showToast(
-                              'Copied',
-                              'Full response copied to clipboard',
-                              tone: ToastTone.success,
-                            );
-                          },
-                        ),
-                      ),
-                      if (canRegenerate) ...[
-                        const SizedBox(width: 4),
-                        OutlinedButton.icon(
-                          style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(44, 32),
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          icon: const Icon(Icons.refresh_rounded, size: 14),
-                          label: const Text('Regenerate'),
-                          onPressed: onRegenerate,
-                        ),
-                      ],
-                    ],
+              ),
+              if (canRegenerate) ...[
+                const SizedBox(width: 4),
+                TextButton(
+                  style: TextButton.styleFrom(
+                    minimumSize: const Size(44, 32),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    visualDensity: VisualDensity.compact,
                   ),
-                ],
+                  onPressed: onRegenerate,
+                  child: Text(
+                    'regenerate',
+                    style: TerminalTokens.monoSmall.copyWith(
+                      color: TerminalTokens.accent,
+                    ),
+                  ),
+                ),
               ],
-            ),
+            ],
           ),
-          if (isUser) const SizedBox(width: 8),
         ],
       ),
     );
   }
 }
 
-// ── Live Streaming Bubble ───────────────────────────────────────────────
+// ── Live streaming line ──────────────────────────────────────────────────
 
-class _StreamingBubble extends StatelessWidget {
+/// Streaming response: plain markdown text with a blinking block
+/// cursor, Claude Code style. No bubble, no avatar.
+class _StreamingLine extends StatelessWidget {
   final String text;
-  final AppTokens t;
 
-  const _StreamingBubble({required this.text, required this.t});
+  const _StreamingLine({required this.text});
 
   @override
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
-      child: Row(
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              color: t.accent.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Icon(Icons.smart_toy_outlined, size: 18, color: t.accent),
-          ),
-          const SizedBox(width: 10),
-          Flexible(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: t.surface,
-                borderRadius: BorderRadius.circular(
-                  16,
-                ).copyWith(bottomLeft: const Radius.circular(4)),
-                border: Border.all(color: t.hairline),
-              ),
-              child: MarkdownMessageView(content: text, t: t),
-            ),
-          ),
+          MarkdownMessageView(content: text, t: AppTokens.of(context)),
+          const SizedBox(height: 2),
+          const _BlinkingCursor(),
         ],
       ),
     );
   }
 }
 
-// ── Live Status Banner ───────────────────────────────────────────────────
+class _BlinkingCursor extends StatefulWidget {
+  const _BlinkingCursor();
 
-class _StatusBanner extends StatelessWidget {
+  @override
+  State<_BlinkingCursor> createState() => _BlinkingCursorState();
+}
+
+class _BlinkingCursorState extends State<_BlinkingCursor>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 530),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _controller,
+      child: Container(
+        width: 8,
+        height: 16,
+        color: TerminalTokens.accent,
+      ),
+    );
+  }
+}
+
+// ── Live status line ───────────────────────────────────────────────────
+
+/// Terminal version of the old status banner: a flat line with a
+/// coral left border, a spinner, the status text and a stop action.
+class _StatusLine extends StatelessWidget {
   final String status;
-  final AppTokens t;
   final VoidCallback onCancel;
 
-  const _StatusBanner({
-    required this.status,
-    required this.t,
-    required this.onCancel,
-  });
+  const _StatusLine({required this.status, required this.onCancel});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: t.accent.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: t.accent.withValues(alpha: 0.2)),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: const BoxDecoration(
+        border: Border(
+          left: BorderSide(color: TerminalTokens.accent, width: 3),
+        ),
       ),
       child: Row(
         children: [
           const SizedBox(
             width: 14,
             height: 14,
-            child: CircularProgressIndicator(strokeWidth: 2),
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: TerminalTokens.accent,
+            ),
           ),
           const SizedBox(width: 10),
           Expanded(
             child: Text(
               status,
-              style: t.caption.copyWith(color: t.text),
+              style: TerminalTokens.caption.copyWith(
+                color: TerminalTokens.text,
+              ),
               overflow: TextOverflow.ellipsis,
             ),
           ),
@@ -1061,7 +1127,11 @@ class _StatusBanner extends StatelessWidget {
             tooltip: 'Cancel',
             constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
             padding: const EdgeInsets.all(8),
-            icon: Icon(Icons.stop_rounded, size: 20, color: t.red),
+            icon: const Icon(
+              Icons.stop_rounded,
+              size: 20,
+              color: TerminalTokens.red,
+            ),
             onPressed: onCancel,
           ),
         ],
@@ -1070,44 +1140,51 @@ class _StatusBanner extends StatelessWidget {
   }
 }
 
-// ── Info banner (diff-only fallback) ───────────────────────────────────
+// ── Info line (diff-only fallback) ─────────────────────────────────────
 
 /// Explains why a task ran without tools (Batch 6 — desain D10): the
 /// gateway does not support tool calling, so the agent fell back to
 /// diff proposals. Dismissable; it clears when the next task starts.
-class _InfoBanner extends StatelessWidget {
+class _InfoLine extends StatelessWidget {
   final String notice;
-  final AppTokens t;
   final VoidCallback onDismiss;
 
-  const _InfoBanner({
-    required this.notice,
-    required this.t,
-    required this.onDismiss,
-  });
+  const _InfoLine({required this.notice, required this.onDismiss});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: t.accent.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: t.accent.withValues(alpha: 0.2)),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: const BoxDecoration(
+        border: Border(
+          left: BorderSide(color: TerminalTokens.accent, width: 3),
+        ),
       ),
       child: Row(
         children: [
-          Icon(Icons.info_outline_rounded, size: 18, color: t.accent),
+          const Icon(
+            Icons.info_outline_rounded,
+            size: 18,
+            color: TerminalTokens.accent,
+          ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(notice, style: t.caption.copyWith(color: t.text)),
+            child: Text(
+              notice,
+              style: TerminalTokens.caption.copyWith(
+                color: TerminalTokens.text,
+              ),
+            ),
           ),
           IconButton(
             tooltip: 'Dismiss',
             constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
             padding: const EdgeInsets.all(8),
-            icon: Icon(Icons.close_rounded, size: 18, color: t.muted),
+            icon: const Icon(
+              Icons.close_rounded,
+              size: 18,
+              color: TerminalTokens.muted,
+            ),
             onPressed: onDismiss,
           ),
         ],
@@ -1116,17 +1193,15 @@ class _InfoBanner extends StatelessWidget {
   }
 }
 
-// ── Error banner with Retry action ───────────────────────────────────────
+// ── Error line with Retry action ─────────────────────────────────────────
 
-class _ErrorBanner extends StatelessWidget {
+class _ErrorLine extends StatelessWidget {
   final String error;
-  final AppTokens t;
   final bool canRetry;
   final VoidCallback onRetry;
 
-  const _ErrorBanner({
+  const _ErrorLine({
     required this.error,
-    required this.t,
     required this.canRetry,
     required this.onRetry,
   });
@@ -1134,26 +1209,36 @@ class _ErrorBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: t.red.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: t.red.withValues(alpha: 0.3)),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: const BoxDecoration(
+        border: Border(
+          left: BorderSide(color: TerminalTokens.red, width: 3),
+        ),
       ),
       child: Row(
         children: [
-          Icon(Icons.error_outline_rounded, size: 18, color: t.red),
+          const Icon(
+            Icons.error_outline_rounded,
+            size: 18,
+            color: TerminalTokens.red,
+          ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(error, style: t.caption.copyWith(color: t.red)),
+            child: Text(
+              error,
+              style: TerminalTokens.caption.copyWith(
+                color: TerminalTokens.red,
+              ),
+            ),
           ),
           if (canRetry) ...[
             const SizedBox(width: 8),
             OutlinedButton(
               style: OutlinedButton.styleFrom(
-                foregroundColor: t.red,
-                side: BorderSide(color: t.red.withValues(alpha: 0.5)),
+                foregroundColor: TerminalTokens.red,
+                side: BorderSide(
+                  color: TerminalTokens.red.withValues(alpha: 0.5),
+                ),
                 minimumSize: const Size(60, 36),
                 padding: const EdgeInsets.symmetric(horizontal: 10),
               ),
@@ -1167,47 +1252,48 @@ class _ErrorBanner extends StatelessWidget {
   }
 }
 
-// ── Patch banner ─────────────────────────────────────────────────────────
+// ── Patch line ───────────────────────────────────────────────────────────
 
-class _PatchBanner extends StatelessWidget {
+class _PatchLine extends StatelessWidget {
   final AssistantController ctrl;
   final ProjectController projCtrl;
-  final AppTokens t;
 
-  const _PatchBanner({
-    required this.ctrl,
-    required this.projCtrl,
-    required this.t,
-  });
+  const _PatchLine({required this.ctrl, required this.projCtrl});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: t.accent.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: t.accent.withValues(alpha: 0.2)),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: const BoxDecoration(
+        border: Border(
+          left: BorderSide(color: TerminalTokens.accent, width: 3),
+        ),
       ),
       child: Row(
         children: [
-          Icon(Icons.difference_outlined, size: 18, color: t.accent),
+          const Icon(
+            Icons.difference_outlined,
+            size: 18,
+            color: TerminalTokens.accent,
+          ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text('Proposed code changes available', style: t.caption),
+            child: Text(
+              'Proposed code changes available',
+              style: TerminalTokens.caption,
+            ),
           ),
           GestureDetector(
             onTap: () => _openReview(context),
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               decoration: BoxDecoration(
-                color: t.accent,
+                color: TerminalTokens.accent,
                 borderRadius: BorderRadius.circular(6),
               ),
               child: Text(
                 'Review',
-                style: t.small.copyWith(
+                style: TerminalTokens.small.copyWith(
                   color: Colors.white,
                   fontWeight: FontWeight.w600,
                 ),
@@ -1337,33 +1423,42 @@ class _PatchBanner extends StatelessWidget {
   }
 }
 
-// ── Rollback banner ──────────────────────────────────────────────────────
+// ── Rollback line ──────────────────────────────────────────────────────
 
-class _RollbackBanner extends StatelessWidget {
+class _RollbackLine extends StatelessWidget {
   final ProjectController projCtrl;
-  final AppTokens t;
 
-  const _RollbackBanner({required this.projCtrl, required this.t});
+  const _RollbackLine({required this.projCtrl});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: t.orange.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: t.orange.withValues(alpha: 0.3)),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: const BoxDecoration(
+        border: Border(
+          left: BorderSide(color: TerminalTokens.orange, width: 3),
+        ),
       ),
       child: Row(
         children: [
-          Icon(Icons.history_rounded, size: 18, color: t.orange),
+          const Icon(
+            Icons.history_rounded,
+            size: 18,
+            color: TerminalTokens.orange,
+          ),
           const SizedBox(width: 8),
-          Expanded(child: Text('AI patch recently applied', style: t.caption)),
+          Expanded(
+            child: Text(
+              'AI patch recently applied',
+              style: TerminalTokens.caption,
+            ),
+          ),
           OutlinedButton.icon(
             style: OutlinedButton.styleFrom(
-              foregroundColor: t.orange,
-              side: BorderSide(color: t.orange.withValues(alpha: 0.5)),
+              foregroundColor: TerminalTokens.orange,
+              side: BorderSide(
+                color: TerminalTokens.orange.withValues(alpha: 0.5),
+              ),
               minimumSize: const Size(60, 36),
               padding: const EdgeInsets.symmetric(horizontal: 10),
             ),
@@ -1592,110 +1687,6 @@ class _SessionSettingsSheetState extends State<_SessionSettingsSheet> {
             onPressed: () => Navigator.of(context).pop(),
           ),
         ],
-      ),
-    );
-  }
-}
-
-// ── Input bar ────────────────────────────────────────────────────────────
-
-class _InputBar extends StatelessWidget {
-  final TextEditingController controller;
-  final bool isLoading;
-  final bool isRestoringSession;
-  final VoidCallback onSend;
-  final VoidCallback onCancel;
-  final AppTokens t;
-
-  const _InputBar({
-    required this.controller,
-    required this.isLoading,
-    required this.isRestoringSession,
-    required this.onSend,
-    required this.onCancel,
-    required this.t,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: t.bg,
-        border: Border(top: BorderSide(color: t.hairline)),
-      ),
-      padding: EdgeInsets.fromLTRB(
-        16,
-        8,
-        16,
-        MediaQuery.of(context).viewInsets.bottom + 8,
-      ),
-      child: SafeArea(
-        top: false,
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: controller,
-                enabled: !isRestoringSession,
-                maxLines: 4,
-                minLines: 1,
-                style: t.body.copyWith(fontSize: 14),
-                decoration: InputDecoration(
-                  hintText: isRestoringSession
-                      ? 'Loading saved conversation…'
-                      : 'Ask about your code…',
-                  hintStyle: t.caption,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                ),
-                textInputAction: TextInputAction.newline,
-                onSubmitted: (_) => onSend(),
-              ),
-            ),
-            const SizedBox(width: 8),
-            if (isLoading)
-              GestureDetector(
-                onTap: onCancel,
-                child: Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: t.red.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: t.red.withValues(alpha: 0.3)),
-                  ),
-                  child: Icon(Icons.stop_rounded, color: t.red, size: 24),
-                ),
-              )
-            else
-              GestureDetector(
-                onTap: isRestoringSession ? null : onSend,
-                child: Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: isRestoringSession ? t.fill : t.accent,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: isRestoringSession
-                      ? Padding(
-                          padding: const EdgeInsets.all(15),
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: t.muted,
-                          ),
-                        )
-                      : const Icon(
-                          Icons.send_rounded,
-                          color: Colors.white,
-                          size: 22,
-                        ),
-                ),
-              ),
-          ],
-        ),
       ),
     );
   }

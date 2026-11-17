@@ -1,21 +1,19 @@
 import 'package:flutter/material.dart';
 
-import '../../core/ui.dart';
 import '../../models/agent_task.dart';
 import '../../models/tool_call_record.dart';
+import 'terminal.dart';
 
-/// Active-task card shown above the message list (Batch 1, desain D9;
-/// Batch 5: todo checklist + resume).
+/// Active-task header in the Claude Code terminal look (Opsi A — full
+/// terminal). The old surface card is gone: a flat section with the
+/// task title in coral mono, a compact Plan/Agent/Auto switch, the
+/// todo checklist as terminal circles (○/◐/●), and per-step tool
+/// calls as mono rows. Behaviour is unchanged: Stop cancels the
+/// running loop, a paused task can resume, steps expand to show their
+/// calls, and the changes button opens the change history.
 ///
-/// Follows the visual pattern of `_RuntimeOutputCard` / `_StatusBanner`:
-/// surface card, hairline border, small text. Shows the task title,
-/// current mode, todo progress (x/y) and the budget used; the Stop
-/// button cancels the running loop (not just the UI).
-///
-/// Batch 5: each todo step is a checklist row that expands to show
-/// the tool calls made for that step, and a paused task shows a
-/// Lanjutkan button that continues the loop from the round it
-/// stopped at instead of restarting.
+/// The budget line (rounds/tools) no longer lives here — it moved to
+/// [TerminalStatusLine] above the prompt.
 class TaskPanel extends StatefulWidget {
   final AgentTask task;
   final bool isRunning;
@@ -92,49 +90,52 @@ class _TaskPanelState extends State<TaskPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final t = AppTokens.of(context);
     final task = widget.task;
     final done = task.doneTodoCount;
     final total = task.totalTodoCount;
-    final progress = total == 0 ? 0.0 : done / total;
     final effectiveMode = widget.mode ?? task.mode;
 
     return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: t.surface,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: t.hairline),
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: TerminalTokens.hairline)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(
-                Icons.assignment_turned_in_outlined,
-                size: 16,
-                color: t.accent,
-              ),
-              const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   task.title,
-                  style: t.body.copyWith(fontWeight: FontWeight.w600),
+                  style: TerminalTokens.titleMono.copyWith(
+                    color: TerminalTokens.accent,
+                  ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
               const SizedBox(width: 8),
               if (widget.onModeChanged == null)
-                AppTag(effectiveMode.label, color: t.accent),
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    effectiveMode.label,
+                    style: TerminalTokens.monoSmall.copyWith(
+                      color: TerminalTokens.accent,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
               if (widget.isRunning) ...[
                 const SizedBox(width: 8),
                 OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
-                    foregroundColor: t.red,
-                    side: BorderSide(color: t.red.withValues(alpha: 0.5)),
+                    foregroundColor: TerminalTokens.red,
+                    side: BorderSide(
+                      color: TerminalTokens.red.withValues(alpha: 0.5),
+                    ),
                     minimumSize: const Size(44, 36),
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     visualDensity: VisualDensity.compact,
@@ -147,48 +148,21 @@ class _TaskPanelState extends State<TaskPanel> {
             ],
           ),
           if (widget.onModeChanged != null) ...[
-            const SizedBox(height: 10),
-            SegmentedButton<AgentMode>(
-              segments: const [
-                ButtonSegment(value: AgentMode.plan, label: Text('Plan')),
-                ButtonSegment(value: AgentMode.agent, label: Text('Agent')),
-                ButtonSegment(value: AgentMode.auto, label: Text('Auto')),
-              ],
-              selected: {effectiveMode},
-              onSelectionChanged: (selection) =>
-                  widget.onModeChanged!(selection.single),
-              showSelectedIcon: false,
-              style: ButtonStyle(
-                visualDensity: VisualDensity.compact,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              TaskPanel.modeHint(effectiveMode),
-              style: t.small.copyWith(color: t.muted),
-            ),
-          ],
-          const SizedBox(height: 8),
-          if (total > 0) ...[
-            Row(
-              children: [
-                Expanded(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(
-                      value: progress,
-                      minHeight: 6,
-                      backgroundColor: t.fill,
-                      valueColor: AlwaysStoppedAnimation<Color>(t.accent),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text('$done/$total langkah', style: t.small),
-              ],
+            const SizedBox(height: 8),
+            _ModeSwitch(
+              mode: effectiveMode,
+              onChanged: widget.onModeChanged!,
             ),
             const SizedBox(height: 6),
+            Text(TaskPanel.modeHint(effectiveMode), style: TerminalTokens.small),
+          ],
+          if (total > 0) ...[
+            const SizedBox(height: 8),
+            Text(
+              '$done/$total langkah',
+              style: TerminalTokens.monoFaint,
+            ),
+            const SizedBox(height: 4),
             // Todo checklist (Batch 5 — desain D9): each step expands
             // to show the tool calls linked to it.
             for (final step in task.todos)
@@ -197,39 +171,21 @@ class _TaskPanelState extends State<TaskPanel> {
                 calls: _callsForStep(step),
                 expanded: _expandedStepId == step.id,
                 onTap: () => setState(() {
-                  _expandedStepId = _expandedStepId == step.id ? null : step.id;
+                  _expandedStepId = _expandedStepId == step.id
+                      ? null
+                      : step.id;
                 }),
-                t: t,
               ),
-            const SizedBox(height: 2),
           ],
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'Ronde ${task.roundsUsed}/${task.maxRounds} • '
-                  'Tool ${task.toolCallsUsed}/${task.maxToolCalls}',
-                  style: t.small.copyWith(color: t.muted),
-                ),
-              ),
-              if (task.budgetWarningReached)
-                Text(
-                  'Anggaran hampir habis',
-                  style: t.small.copyWith(
-                    color: t.orange,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-            ],
-          ),
           if (widget.changeCount > 0) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Align(
               alignment: Alignment.centerLeft,
               child: TextButton.icon(
                 style: TextButton.styleFrom(
+                  foregroundColor: TerminalTokens.accent,
                   minimumSize: const Size(44, 36),
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
                   visualDensity: VisualDensity.compact,
                 ),
                 icon: const Icon(Icons.history_rounded, size: 16),
@@ -243,37 +199,33 @@ class _TaskPanelState extends State<TaskPanel> {
             ),
           ],
           if (!widget.isRunning) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Row(
               children: [
                 Expanded(
                   child: Text(
                     TaskPanel.statusLabel(task.status),
-                    style: t.small.copyWith(
+                    style: TerminalTokens.small.copyWith(
                       color: task.status == TaskStatus.done
-                          ? t.green
+                          ? TerminalTokens.green
                           : task.status == TaskStatus.needsHelp ||
                                 task.status == TaskStatus.failed
-                          ? t.red
-                          : t.muted,
+                          ? TerminalTokens.red
+                          : TerminalTokens.muted,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
                 if (TaskPanel.canResume(task.status) && widget.onResume != null)
-                  FilledButton.icon(
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size(44, 36),
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    icon: const Icon(Icons.play_arrow_rounded, size: 18),
-                    label: const Text('Lanjutkan'),
+                  TerminalPrimaryButton(
+                    label: 'Lanjutkan',
+                    icon: Icons.play_arrow_rounded,
                     onPressed: widget.onResume,
                   ),
               ],
             ),
           ],
+          const SizedBox(height: 6),
         ],
       ),
     );
@@ -287,29 +239,74 @@ class _TaskPanelState extends State<TaskPanel> {
   }
 }
 
+/// Compact terminal mode switch: `Plan / Agent / Auto` as tappable
+/// mono labels, the active one in coral. Replaces the old
+/// SegmentedButton; the callback contract is the same.
+class _ModeSwitch extends StatelessWidget {
+  final AgentMode mode;
+  final ValueChanged<AgentMode> onChanged;
+
+  const _ModeSwitch({required this.mode, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    const modes = [AgentMode.plan, AgentMode.agent, AgentMode.auto];
+    return Row(
+      children: [
+        for (var i = 0; i < modes.length; i++) ...[
+          if (i > 0)
+            const Text(
+              ' / ',
+              style: TextStyle(color: TerminalTokens.faint, fontSize: 13),
+            ),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => onChanged(modes[i]),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Text(
+                modes[i].label,
+                style: TerminalTokens.mono.copyWith(
+                  color: modes[i] == mode
+                      ? TerminalTokens.accent
+                      : TerminalTokens.muted,
+                  fontWeight: modes[i] == mode
+                      ? FontWeight.w700
+                      : FontWeight.w400,
+                  decoration: modes[i] == mode
+                      ? TextDecoration.underline
+                      : null,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 class _TodoRow extends StatelessWidget {
   final TaskStep step;
   final List<ToolCallRecord> calls;
   final bool expanded;
   final VoidCallback onTap;
-  final AppTokens t;
 
   const _TodoRow({
     required this.step,
     required this.calls,
     required this.expanded,
     required this.onTap,
-    required this.t,
   });
 
   @override
   Widget build(BuildContext context) {
     final statusColor = switch (step.status) {
-      TaskStepStatus.done => t.green,
-      TaskStepStatus.active => t.accent,
-      TaskStepStatus.failed => t.red,
-      TaskStepStatus.skipped => t.muted,
-      TaskStepStatus.pending => t.muted,
+      TaskStepStatus.done => TerminalTokens.green,
+      TaskStepStatus.active => TerminalTokens.accent,
+      TaskStepStatus.failed => TerminalTokens.red,
+      TaskStepStatus.skipped => TerminalTokens.muted,
+      TaskStepStatus.pending => TerminalTokens.muted,
     };
     final statusIcon = switch (step.status) {
       TaskStepStatus.done => Icons.check_circle_rounded,
@@ -320,7 +317,6 @@ class _TodoRow extends StatelessWidget {
     };
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 4),
         child: Column(
@@ -333,10 +329,10 @@ class _TodoRow extends StatelessWidget {
                 Expanded(
                   child: Text(
                     step.title,
-                    style: t.small.copyWith(
+                    style: TerminalTokens.mono.copyWith(
                       color: step.status == TaskStepStatus.done
-                          ? t.muted
-                          : t.text,
+                          ? TerminalTokens.muted
+                          : TerminalTokens.text,
                       decoration: step.status == TaskStepStatus.done
                           ? TextDecoration.lineThrough
                           : null,
@@ -348,7 +344,7 @@ class _TodoRow extends StatelessWidget {
                 if (calls.isNotEmpty) ...[
                   Text(
                     '${calls.length} call${calls.length == 1 ? '' : 's'}',
-                    style: t.small.copyWith(color: t.faint),
+                    style: TerminalTokens.monoFaint,
                   ),
                   const SizedBox(width: 2),
                   Icon(
@@ -356,7 +352,7 @@ class _TodoRow extends StatelessWidget {
                         ? Icons.expand_less_rounded
                         : Icons.expand_more_rounded,
                     size: 16,
-                    color: t.muted,
+                    color: TerminalTokens.muted,
                   ),
                 ],
               ],
@@ -379,19 +375,13 @@ class _TodoRow extends StatelessWidget {
                                   ? Icons.autorenew_rounded
                                   : Icons.error_outline_rounded,
                               size: 13,
-                              color: call.status == ToolCallStatus.ok
-                                  ? t.green
-                                  : call.status == ToolCallStatus.running
-                                  ? t.accent
-                                  : t.red,
+                              color: terminalStatusColor(call.status),
                             ),
                             const SizedBox(width: 6),
                             Expanded(
                               child: Text(
                                 '${call.toolName} — ${call.status.label}',
-                                style: t.small.copyWith(
-                                  fontFamily: 'monospace',
-                                ),
+                                style: TerminalTokens.monoSmall,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
